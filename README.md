@@ -70,25 +70,25 @@ npx tsx src/server.ts
 
 Saída esperada:
 ```
-🚀 Backend rodando em http://localhost:3001
+🚀 Backend rodando em http://localhost:3000
 ```
 
 ### Terminal 2 — Frontend
 
 ```bash
 cd frontend
-npx next dev
+npx next dev -p 3001
 ```
 
 Saída esperada:
 ```
 ▲ Next.js 15.1.3
-- Local: http://localhost:3000
+- Local: http://localhost:3001
 ```
 
 ### Acessar o sistema
 
-Abra o navegador em: **http://localhost:3000**
+Abra o navegador em: **http://localhost:3001**
 
 ---
 
@@ -162,13 +162,17 @@ Todas no arquivo `.env` na raiz do projeto:
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
 | `OPENAI_API_KEY` | **Obrigatório.** Sua chave da OpenAI | — |
-| `OPENAI_TRANSCRIPTION_MODEL` | Modelo de transcrição | `gpt-4o-mini-transcribe` |
+| `OPENAI_TRANSCRIPTION_MODEL` | Modelo de transcrição | `whisper-1` |
 | `OPENAI_EXTRACTION_MODEL` | Modelo de extração clínica | `gpt-4.1` |
 | `OPENAI_SOAP_MODEL` | Modelo para geração do SOAP | `gpt-4.1` |
-| `PORT` | Porta do backend | `3001` |
-| `FRONTEND_URL` | URL do frontend (para CORS) | `http://localhost:3000` |
-| `DATABASE_URL` | Caminho do banco SQLite | `file:./prisma/dev.db` |
-| `NEXT_PUBLIC_API_URL` | URL da API para o frontend | `http://localhost:3001` |
+| `PORT` | Porta do backend | `3000` |
+| `FRONTEND_URL` | URL do frontend (para CORS) | `http://localhost:3001` |
+| `DATABASE_URL` | Caminho do banco SQLite. Caminhos `file:` relativos resolvem a partir de `backend/prisma/` | `file:./dev.db` |
+| `NEXT_PUBLIC_API_URL` | URL do backend usada pelo frontend | `http://localhost:3000` |
+
+> **Nota:** o filtro de alucinações da transcrição funciona por completo apenas com
+> `whisper-1` (depende do formato `verbose_json`). Com outros modelos sobra apenas o
+> bloqueio por lista de frases conhecidas.
 
 ---
 

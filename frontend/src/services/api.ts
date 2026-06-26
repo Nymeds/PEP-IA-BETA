@@ -9,7 +9,9 @@ import {
   PatientSummary,
 } from '@/types'
 
-export const BASE = 'http://localhost:3000'
+// URL do backend. Configurável via NEXT_PUBLIC_API_URL (o Next embute o valor no
+// build do client); cai para localhost:3000 em desenvolvimento.
+export const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   // Só envia Content-Type: application/json quando há corpo — senão o Fastify
