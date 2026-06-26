@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Patient {
+  id            String   @id @default(cuid())
+  name          String
+  socialName    String?
+  cpf           String?
+  rg            String?
+  birthDate     String?
+  sex           String?
+  maritalStatus String?
+  phone         String?
+  whatsapp      String?
+  email         String?
+  cep           String?
+  address       String?
+  addressNumber String?
+  neighborhood  String?
+  city          String?
+  state         String?
+  emergencyContact String?
+  emergencyPhone   String?
+  bloodType     String?
+  allergies     String?
+  chronicDiseases String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  consultations Consultation[]
+}
+
+model Consultation {
+  id        String @id @default(cuid())
+  patientId String
+
+  // Armazenamento de áudio e transcrição
+  audioPath  String?
+  transcript String?
+  // Transcrição estruturada em turnos (Médico/Paciente) gerada na revisão final
+  transcriptStructured String?
+
+  // Anamnese
+  chiefComplaint   String?
+  hda              String?
+  symptomStart     String?
+  symptomIntensity String?
+  symptoms         String?
+  improvingFactors String?
+  worseningFactors String?
+
+  // Antecedentes
+  previousDiseases   String?
+  surgeries          String?
+  hospitalizations   String?
+  allergiesDetails   String?
+  currentMedications String?
+  familyHistory      String?
+
+  // Hábitos
+  smoking          String?
+  alcohol          String?
+  physicalActivity String?
+  sleep            String?
+  diet             String?
+  drugs            String?
+  occupation       String?
+
+  // Revisão de sistemas (JSON)
+  systemsReview String?
+
+  // Exame físico
+  vitalSigns   String?
+  weight       Float?
+  height       Float?
+  bmi          Float?
+  generalState String?
+  physicalExam String?
+
+  // Diagnóstico
+  mainHypothesis     String?
+  differentials      String?
+  confirmedDiagnosis String?
+  cid                String?
+
+  // Conduta
+  therapeuticPlan String?
+  orientations    String?
+  referrals       String?
+  followUpDate    String?
+
+  // SOAP
+  subjective String?
+  objective  String?
+  assessment String?
+  plan       String?
+
+  // status: "scheduled" (agendada) | "active" (em atendimento) | "completed" (encerrada)
+  status      String    @default("active")
+  scheduledAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  patient  Patient                @relation(fields: [patientId], references: [id])
+  versions ConsultationVersion[]
+}
+
+// Histórico de versões do prontuário — cada correção gera uma versão NOVA,
+// sem sobrescrever a anterior (rastreabilidade / anti-adulteração).
+model ConsultationVersion {
+  id             String   @id @default(cuid())
+  consultationId String
+  version        Int
+  // Snapshot completo dos campos clínicos do PEP naquele momento (JSON)
+  snapshot       String
+  // Transcrição vigente naquela versão
+  transcript     String?
+  // O que motivou a nova versão (ex: "edição do trecho da HDA")
+  reason         String?
+  // Trechos editados, para auditoria: { before, after }
+  editDiff       String?
+  createdAt      DateTime @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId])
+}
