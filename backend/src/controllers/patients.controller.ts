@@ -1,19 +1,88 @@
-import { FastifyRequest, FastifyReply } from 'fastify'
-import { Prisma } from '@prisma/client'
+import { FastifyReply, FastifyRequest } from 'fastify'
 import { getPrisma } from '../lib/prisma'
 import { summarizePatient } from '../services/analysis.service'
 
-export async function listPatients(_req: FastifyRequest, reply: FastifyReply) {
-  const patients = await getPrisma().patient.findMany({
+interface PatientsListQuery {
+  search?: string
+}
+
+interface PatientBody {
+  name?: string
+  socialName?: string | null
+  cpf?: string | null
+  rg?: string | null
+  birthDate?: string | null
+  sex?: string | null
+  maritalStatus?: string | null
+  phone?: string | null
+  whatsapp?: string | null
+  email?: string | null
+  cep?: string | null
+  address?: string | null
+  addressNumber?: string | null
+  neighborhood?: string | null
+  city?: string | null
+  state?: string | null
+  emergencyContact?: string | null
+  emergencyPhone?: string | null
+  bloodType?: string | null
+  allergies?: string | null
+  chronicDiseases?: string | null
+  notes?: string | null
+  quickCreated?: boolean
+}
+
+async function findPatientByOwner(id: string, userId: string) {
+  return getPrisma().patient.findFirst({
+    where: { id, userId },
     include: {
       consultations: {
-        orderBy: { createdAt: 'desc' },
-        take: 1,
-        select: { id: true, createdAt: true, status: true, chiefComplaint: true },
+        orderBy: [{ scheduledAt: 'desc' }, { createdAt: 'desc' }],
+        include: { schedule: true },
       },
     },
-    orderBy: { name: 'asc' },
   })
+}
+
+export async function listPatients(
+  req: FastifyRequest<{ Querystring: PatientsListQuery }>,
+  reply: FastifyReply
+) {
+  const search = req.query?.search?.trim()
+  const patients = await getPrisma().patient.findMany({
+    where: {
+      userId: req.authUser!.id,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search } },
+              { socialName: { contains: search } },
+              { cpf: { contains: search } },
+              { phone: { contains: search } },
+            ],
+          }
+        : {}),
+    },
+    include: {
+      consultations: {
+        orderBy: [{ scheduledAt: 'desc' }, { createdAt: 'desc' }],
+        take: 10,
+        select: {
+          id: true,
+          patientId: true,
+          createdAt: true,
+          scheduledAt: true,
+          status: true,
+          chiefComplaint: true,
+          schedule: {
+            select: { id: true, title: true, specialty: true },
+          },
+        },
+      },
+    },
+    orderBy: [{ quickCreated: 'asc' }, { name: 'asc' }],
+  })
+
   return reply.send(patients)
 }
 
@@ -21,30 +90,50 @@ export async function getPatient(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  const patient = await getPrisma().patient.findUnique({
-    where: { id: req.params.id },
-    include: { consultations: { orderBy: { createdAt: 'desc' } } },
-  })
-  if (!patient) return reply.status(404).send({ error: 'Paciente não encontrado' })
+  const patient = await findPatientByOwner(req.params.id, req.authUser!.id)
+  if (!patient) return reply.status(404).send({ error: 'Paciente nao encontrado' })
   return reply.send(patient)
 }
 
 export async function createPatient(
-  req: FastifyRequest<{ Body: Prisma.PatientCreateInput }>,
+  req: FastifyRequest<{ Body: PatientBody }>,
   reply: FastifyReply
 ) {
-  const patient = await getPrisma().patient.create({ data: req.body })
+  const body = req.body || {}
+  if (!body.name?.trim()) {
+    return reply.status(400).send({ error: 'Nome do paciente e obrigatorio' })
+  }
+
+  const patient = await getPrisma().patient.create({
+    data: {
+      ...body,
+      name: body.name.trim(),
+      userId: req.authUser!.id,
+      quickCreated: Boolean(body.quickCreated),
+    },
+  })
+
   return reply.status(201).send(patient)
 }
 
 export async function updatePatient(
-  req: FastifyRequest<{ Params: { id: string }; Body: Prisma.PatientUpdateInput }>,
+  req: FastifyRequest<{ Params: { id: string }; Body: Partial<PatientBody> }>,
   reply: FastifyReply
 ) {
-  const patient = await getPrisma().patient.update({
-    where: { id: req.params.id },
-    data: req.body,
+  const existing = await getPrisma().patient.findFirst({
+    where: { id: req.params.id, userId: req.authUser!.id },
+    select: { id: true },
   })
+
+  if (!existing) return reply.status(404).send({ error: 'Paciente nao encontrado' })
+
+  const body = req.body || {}
+
+  const patient = await getPrisma().patient.update({
+    where: { id: existing.id },
+    data: body,
+  })
+
   return reply.send(patient)
 }
 
@@ -52,40 +141,48 @@ export async function deletePatient(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  await getPrisma().patient.delete({ where: { id: req.params.id } })
+  const existing = await getPrisma().patient.findFirst({
+    where: { id: req.params.id, userId: req.authUser!.id },
+    select: { id: true },
+  })
+
+  if (!existing) return reply.status(404).send({ error: 'Paciente nao encontrado' })
+
+  await getPrisma().patient.delete({ where: { id: existing.id } })
   return reply.status(204).send()
 }
 
-// Gera um resumo clínico do paciente (IA) com base em todos os atendimentos
+// Gera um resumo clinico do paciente (IA) com base em todos os atendimentos
 export async function getPatientSummary(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  const patient = await getPrisma().patient.findUnique({
-    where: { id: req.params.id },
-    include: { consultations: { orderBy: { createdAt: 'asc' } } },
-  })
-  if (!patient) return reply.status(404).send({ error: 'Paciente não encontrado' })
+  const patient = await findPatientByOwner(req.params.id, req.authUser!.id)
+  if (!patient) return reply.status(404).send({ error: 'Paciente nao encontrado' })
 
-  // Considera apenas atendimentos com algum conteúdo clínico
-  const relevant = patient.consultations.filter(
-    (c) => c.transcript || c.chiefComplaint || c.assessment || c.plan
-  )
+  const relevant = patient.consultations.filter((consultation) => {
+    return (
+      consultation.transcript ||
+      consultation.chiefComplaint ||
+      consultation.assessment ||
+      consultation.plan
+    )
+  })
 
   if (!relevant.length) {
-    return reply.send({ summary: null, message: 'Sem atendimentos com conteúdo para resumir' })
+    return reply.send({ summary: null, message: 'Sem atendimentos com conteudo para resumir' })
   }
 
   const summary = await summarizePatient({
     name: patient.name,
-    consultations: relevant.map((c) => ({
-      date: new Date(c.createdAt).toLocaleDateString('pt-BR'),
-      chiefComplaint: c.chiefComplaint,
-      mainHypothesis: c.mainHypothesis,
-      assessment: c.assessment,
-      plan: c.plan,
-      currentMedications: c.currentMedications,
-      allergiesDetails: c.allergiesDetails,
+    consultations: relevant.map((consultation) => ({
+      date: new Date(consultation.scheduledAt || consultation.createdAt).toLocaleDateString('pt-BR'),
+      chiefComplaint: consultation.chiefComplaint,
+      mainHypothesis: consultation.mainHypothesis,
+      assessment: consultation.assessment,
+      plan: consultation.plan,
+      currentMedications: consultation.currentMedications,
+      allergiesDetails: consultation.allergiesDetails,
     })),
   })
 

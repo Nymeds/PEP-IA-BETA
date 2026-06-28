@@ -9,7 +9,7 @@ import { format, calcAge } from '../shared/utils'
 export function PatientsList() {
   const { data: patients = [], isLoading } = useQuery({
     queryKey: ['patients'],
-    queryFn: api.patients.list,
+    queryFn: () => api.patients.list(),
   })
 
   const [search, setSearch] = useState('')

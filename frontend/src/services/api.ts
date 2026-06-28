@@ -1,37 +1,89 @@
 import {
+  AuthUser,
+  CalendarAppointment,
   Consultation,
-  Patient,
-  TranscribeResponse,
+  ConsultationVersion,
+  ConversationTopic,
   ExtractedData,
   FinalizeResponse,
-  ConversationTopic,
-  ConsultationVersion,
+  Patient,
   PatientSummary,
+  ScheduleAgenda,
+  ScheduleAgendaCalendarResponse,
+  ScheduleAgendaResponse,
+  ScheduleAgendaSlotsResponse,
+  ScheduleAgendasResponse,
+  ScheduleCalendarResponse,
+  ScheduleDashboardResponse,
+  ScheduleSettingsResponse,
+  ScheduleSlotsResponse,
+  TranscribeResponse,
 } from '@/types'
 
-// URL do backend. Configurável via NEXT_PUBLIC_API_URL (o Next embute o valor no
-// build do client); cai para localhost:3000 em desenvolvimento.
 export const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  // Só envia Content-Type: application/json quando há corpo — senão o Fastify
-  // rejeita POSTs sem body (ex: finalize/reinterpret) com FST_ERR_CTP_EMPTY_JSON_BODY.
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+function buildUrl(path: string, query?: Record<string, string | undefined>) {
+  const url = new URL(`${BASE}${path}`)
+  if (query) {
+    Object.entries(query).forEach(([key, value]) => {
+      if (value) url.searchParams.set(key, value)
+    })
+  }
+  return url.toString()
+}
+
+async function parseError(res: Response): Promise<never> {
+  const err = await res.json().catch(() => ({ error: res.statusText }))
+  throw new ApiError(err.message || err.error || 'Erro na requisicao', res.status)
+}
+
+async function request<T>(
+  path: string,
+  options?: RequestInit,
+  query?: Record<string, string | undefined>
+): Promise<T> {
   const headers: Record<string, string> = { ...(options?.headers as Record<string, string>) }
   if (options?.body) headers['Content-Type'] = 'application/json'
 
-  const res = await fetch(`${BASE}${path}`, { ...options, headers })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.message || err.error || 'Erro na requisição')
-  }
+  const res = await fetch(buildUrl(path, query), {
+    ...options,
+    headers,
+    credentials: 'include',
+  })
+
+  if (!res.ok) return parseError(res)
   if (res.status === 204) return undefined as T
   return res.json()
 }
 
 export const api = {
-  // Patients
+  auth: {
+    login: (data: { email: string; password: string }) =>
+      request<{ user: AuthUser }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    register: (data: { email: string; password: string; name: string; suggestedName: string }) =>
+      request<{ user: AuthUser }>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    me: () => request<{ user: AuthUser }>('/api/auth/me'),
+    logout: () => request<{ success: boolean }>('/api/auth/logout', { method: 'POST' }),
+  },
+
   patients: {
-    list: () => request<Patient[]>('/api/patients'),
+    list: (search?: string) => request<Patient[]>('/api/patients', undefined, { search }),
     get: (id: string) => request<Patient>(`/api/patients/${id}`),
     create: (data: Partial<Patient>) =>
       request<Patient>('/api/patients', { method: 'POST', body: JSON.stringify(data) }),
@@ -44,14 +96,14 @@ export const api = {
       ),
   },
 
-  // Consultations
   consultations: {
-    // Sem scheduledAt → atendimento imediato (active). Com data → agendada (scheduled).
     create: (patientId: string, scheduledAt?: string) =>
       request<Consultation>('/api/consultations', {
         method: 'POST',
         body: JSON.stringify({ patientId, scheduledAt }),
       }),
+    start: (id: string) =>
+      request<Consultation>(`/api/consultations/${id}/start`, { method: 'POST' }),
     get: (id: string) => request<Consultation>(`/api/consultations/${id}`),
     update: (id: string, data: Partial<Consultation>) =>
       request<Consultation>(`/api/consultations/${id}`, {
@@ -66,56 +118,187 @@ export const api = {
     transcribeChunk: async (id: string, audioBlob: Blob): Promise<TranscribeResponse> => {
       const formData = new FormData()
       formData.append('audio', audioBlob, 'chunk.webm')
-      const res = await fetch(`${BASE}/api/consultations/${id}/transcribe`, {
+      const res = await fetch(buildUrl(`/api/consultations/${id}/transcribe`), {
         method: 'POST',
         body: formData,
+        credentials: 'include',
       })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ message: res.statusText }))
-        throw new Error(body.message || body.error || `Erro ${res.status} na transcrição`)
-      }
+      if (!res.ok) return parseError(res)
       return res.json()
     },
 
-    // Relê toda a transcrição acumulada e consolida os campos clínicos
     reinterpret: async (id: string): Promise<{ extracted: ExtractedData }> => {
-      const res = await fetch(`${BASE}/api/consultations/${id}/reinterpret`, { method: 'POST' })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ message: res.statusText }))
-        throw new Error(body.message || body.error || `Erro ${res.status} na interpretação`)
-      }
+      const res = await fetch(buildUrl(`/api/consultations/${id}/reinterpret`), {
+        method: 'POST',
+        credentials: 'include',
+      })
+      if (!res.ok) return parseError(res)
       return res.json()
     },
 
     saveAudio: async (id: string, audioBlob: Blob): Promise<{ audioPath: string }> => {
       const formData = new FormData()
       formData.append('audio', audioBlob, 'recording.webm')
-      const res = await fetch(`${BASE}/api/consultations/${id}/audio`, {
+      const res = await fetch(buildUrl(`/api/consultations/${id}/audio`), {
         method: 'POST',
         body: formData,
+        credentials: 'include',
       })
-      if (!res.ok) throw new Error('Erro ao salvar áudio')
+      if (!res.ok) return parseError(res)
       return res.json()
     },
 
     finalize: (id: string) =>
       request<FinalizeResponse>(`/api/consultations/${id}/finalize`, { method: 'POST' }),
 
-    // URL direta do áudio gravado (para o elemento <audio>)
     audioUrl: (id: string) => `${BASE}/api/consultations/${id}/audio-file`,
 
-    // Tópicos da conversa sugeridos pela IA
     topics: (id: string) =>
       request<{ topics: ConversationTopic[] }>(`/api/consultations/${id}/topics`, { method: 'GET' }),
 
-    // Cria nova versão a partir da transcrição editada (re-extrai o PEP)
-    createVersion: (id: string, newTranscript: string, reason?: string, editDiff?: { before: string; after: string }) =>
+    createVersion: (
+      id: string,
+      newTranscript: string,
+      reason?: string,
+      editDiff?: { before: string; after: string }
+    ) =>
       request<{ consultation: Consultation; extracted: ExtractedData; savedVersion: number }>(
         `/api/consultations/${id}/versions`,
         { method: 'POST', body: JSON.stringify({ newTranscript, reason, editDiff }) }
       ),
 
-    listVersions: (id: string) =>
-      request<ConsultationVersion[]>(`/api/consultations/${id}/versions`),
+    listVersions: (id: string) => request<ConsultationVersion[]>(`/api/consultations/${id}/versions`),
+  },
+
+  schedule: {
+    dashboard: (month?: string) =>
+      request<ScheduleDashboardResponse>('/api/schedule/dashboard', undefined, { month }),
+    agendas: () => request<ScheduleAgendasResponse>('/api/schedule/agendas'),
+    createAgenda: (
+      data: Omit<
+        ScheduleAgenda,
+        'id' | 'enabledShiftCount' | 'maxAppointmentsPerDay' | 'createdAt' | 'updatedAt'
+      >
+    ) =>
+      request<ScheduleAgendaResponse>('/api/schedule/agendas', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    getAgenda: (agendaId: string) =>
+      request<ScheduleAgendaResponse>(`/api/schedule/agendas/${agendaId}`),
+    updateAgenda: (
+      agendaId: string,
+      data: Omit<
+        ScheduleAgenda,
+        'id' | 'enabledShiftCount' | 'maxAppointmentsPerDay' | 'createdAt' | 'updatedAt'
+      >
+    ) =>
+      request<ScheduleAgendaResponse>(`/api/schedule/agendas/${agendaId}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    agendaCalendar: (agendaId: string, month?: string) =>
+      request<ScheduleAgendaCalendarResponse>(
+        `/api/schedule/agendas/${agendaId}/calendar`,
+        undefined,
+        { month }
+      ),
+    agendaSlots: (agendaId: string, date: string) =>
+      request<ScheduleAgendaSlotsResponse>(
+        `/api/schedule/agendas/${agendaId}/slots`,
+        undefined,
+        { date }
+      ),
+    quickBook: async (
+      agendaIdOrData: string | { patientId?: string; patientName?: string; scheduledAt: string },
+      maybeData?: { patientId?: string; patientName?: string; scheduledAt: string }
+    ) => {
+      if (typeof agendaIdOrData === 'string') {
+        return request<Consultation>(`/api/schedule/agendas/${agendaIdOrData}/quick-book`, {
+          method: 'POST',
+          body: JSON.stringify(maybeData),
+        })
+      }
+
+      const { agendas } = await api.schedule.agendas()
+      const primaryAgenda = agendas[0]
+      if (!primaryAgenda) {
+        throw new ApiError('Nenhuma agenda cadastrada', 404)
+      }
+
+      return request<Consultation>(`/api/schedule/agendas/${primaryAgenda.id}/quick-book`, {
+        method: 'POST',
+        body: JSON.stringify(agendaIdOrData),
+      })
+    },
+    calendar: async (month?: string): Promise<ScheduleCalendarResponse> => {
+      const { agendas } = await api.schedule.agendas()
+      const primaryAgenda = agendas[0]
+      if (!primaryAgenda) {
+        throw new ApiError('Nenhuma agenda cadastrada', 404)
+      }
+      const [calendar, dashboard] = await Promise.all([
+        api.schedule.agendaCalendar(primaryAgenda.id, month),
+        api.schedule.dashboard(month),
+      ])
+      return {
+        month: calendar.month,
+        settings: calendar.agenda,
+        enabledShiftCount: calendar.agenda.enabledShiftCount,
+        appointments: calendar.appointments,
+        stats: {
+          patientsCount: dashboard.stats.patientsCount,
+          consultationsCount: dashboard.stats.consultationsCount,
+          todayAppointmentsCount: dashboard.stats.todayAppointmentsCount,
+          completedConsultationsCount: dashboard.stats.completedConsultationsCount,
+          scheduledThisMonthCount: calendar.stats.scheduledThisMonthCount,
+        },
+      }
+    },
+    settings: async (): Promise<ScheduleSettingsResponse> => {
+      const { agendas } = await api.schedule.agendas()
+      const primaryAgenda = agendas[0]
+      if (!primaryAgenda) {
+        throw new ApiError('Nenhuma agenda cadastrada', 404)
+      }
+      return { settings: primaryAgenda, enabledShiftCount: primaryAgenda.enabledShiftCount, maxAppointmentsPerDay: primaryAgenda.maxAppointmentsPerDay }
+    },
+    updateSettings: async (
+      data: Pick<
+        ScheduleAgenda,
+        'activeWeekDays' | 'workOnHolidays' | 'appointmentDurationMinutes' | 'shifts'
+      >
+    ): Promise<ScheduleSettingsResponse> => {
+      const { agendas } = await api.schedule.agendas()
+      const primaryAgenda = agendas[0]
+      if (!primaryAgenda) {
+        throw new ApiError('Nenhuma agenda cadastrada', 404)
+      }
+      const response = await api.schedule.updateAgenda(primaryAgenda.id, {
+        title: primaryAgenda.title,
+        specialty: primaryAgenda.specialty,
+        status: primaryAgenda.status,
+        ...data,
+      })
+      return {
+        settings: response.agenda,
+        enabledShiftCount: response.agenda.enabledShiftCount,
+        maxAppointmentsPerDay: response.agenda.maxAppointmentsPerDay,
+      }
+    },
+    slots: async (date: string): Promise<ScheduleSlotsResponse> => {
+      const { agendas } = await api.schedule.agendas()
+      const primaryAgenda = agendas[0]
+      if (!primaryAgenda) {
+        throw new ApiError('Nenhuma agenda cadastrada', 404)
+      }
+      const response = await api.schedule.agendaSlots(primaryAgenda.id, date)
+      return {
+        ...response,
+        settings: response.agenda,
+      }
+    },
   },
 }
+
+export type { CalendarAppointment }

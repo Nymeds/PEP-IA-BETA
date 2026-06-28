@@ -177,7 +177,7 @@ export function useConsultation(initialConsultation: Consultation) {
 
   const applySoap = useCallback(
     (soap: { subjective: string; objective: string; assessment: string; plan: string }) => {
-      setConsultation((prev) => ({ ...prev, ...soap, status: 'completed' }))
+      setConsultation((prev) => ({ ...prev, ...soap }))
       setTabStatuses((prev) => ({ ...prev, soap: 'complete' }))
       setActiveTab('soap')
     },

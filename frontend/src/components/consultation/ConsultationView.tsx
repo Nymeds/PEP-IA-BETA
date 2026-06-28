@@ -44,6 +44,7 @@ export function ConsultationView({ consultation }: Props) {
   const [isGeneratingSoap, setIsGeneratingSoap] = useState(false)
   const [isInterpreting, setIsInterpreting] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
   const [showConversation, setShowConversation] = useState(false)
 
   // Conta chunks recebidos para disparar a re-interpretação a cada N
@@ -106,6 +107,23 @@ export function ConsultationView({ consultation }: Props) {
     onStop: handleStop,
   })
 
+  const isWaiting = data.status === 'em_espera' || data.status === 'scheduled'
+  const isInProgress = data.status === 'em_consulta' || data.status === 'active'
+
+  const handleStart = useCallback(async () => {
+    if (isStarting) return
+    setIsStarting(true)
+    try {
+      const updated = await api.consultations.start(consultation.id)
+      applyConsultation(updated)
+    } catch (err) {
+      console.error('Erro ao iniciar consulta:', err)
+      alert(err instanceof Error ? err.message : 'Nao foi possivel iniciar a consulta')
+    } finally {
+      setIsStarting(false)
+    }
+  }, [applyConsultation, consultation.id, isStarting])
+
   const handleFinalize = useCallback(async () => {
     setIsGeneratingSoap(true)
     try {
@@ -158,10 +176,12 @@ export function ConsultationView({ consultation }: Props) {
         isSaving={isSaving}
         isGeneratingSoap={isGeneratingSoap}
         isClosing={isClosing}
+        isStarting={isStarting}
         isAutoSaving={isAutoSaving}
         lastSavedAt={lastSavedAt}
         recordingState={recordingState}
         onSave={saveConsultation}
+        onStart={handleStart}
         onFinalize={handleFinalize}
         onClose={handleClose}
         onOpenConversation={() => setShowConversation(true)}
@@ -184,21 +204,34 @@ export function ConsultationView({ consultation }: Props) {
 
         <div
           className="flex-1 overflow-y-auto"
-          style={{ paddingBottom: recordingState !== 'idle' ? '220px' : '80px' }}
+          style={{ paddingBottom: isInProgress && recordingState !== 'idle' ? '220px' : '80px' }}
         >
           <div className="p-6 max-w-3xl mx-auto animate-fade-in">
+            {isWaiting && (
+              <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4">
+                <p className="text-sm font-semibold text-amber-800">Consulta em espera</p>
+                <p className="text-sm text-amber-700 mt-1">
+                  O prontuario esta reservado, mas a sessao ainda nao foi iniciada. Isso evita chamadas duplicadas e garante apenas uma consulta em andamento por medico.
+                </p>
+                <button onClick={handleStart} disabled={isStarting} className="btn-primary mt-4">
+                  {isStarting ? 'Iniciando...' : 'Iniciar consulta agora'}
+                </button>
+              </div>
+            )}
             {tabContent[activeTab]}
           </div>
         </div>
       </div>
 
-      <RecordingBar
-        recordingState={recordingState}
-        transcript={transcript}
-        isInterpreting={isInterpreting}
-        onStart={startRecording}
-        onStop={stopRecording}
-      />
+      {isInProgress && (
+        <RecordingBar
+          recordingState={recordingState}
+          transcript={transcript}
+          isInterpreting={isInterpreting}
+          onStart={startRecording}
+          onStop={stopRecording}
+        />
+      )}
     </div>
   )
 }

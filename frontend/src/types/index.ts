@@ -1,6 +1,8 @@
 export interface Patient {
   id: string
+  userId?: string
   name: string
+  quickCreated?: boolean
   socialName?: string
   cpf?: string
   rg?: string
@@ -31,8 +33,11 @@ export interface ConsultationSummary {
   id: string
   patientId: string
   chiefComplaint?: string
-  status: string
+  status: ConsultationStatus | string
   scheduledAt?: string
+  startedAt?: string
+  finishedAt?: string
+  schedule?: Pick<ScheduleAgenda, 'id' | 'title' | 'specialty'> | null
   createdAt: string
 }
 
@@ -81,6 +86,8 @@ export interface FamilyHistory {
 export interface Consultation {
   id: string
   patientId: string
+  scheduleId?: string | null
+  schedule?: ScheduleAgenda | null
   patient?: Patient
   audioPath?: string
   transcript?: string
@@ -132,8 +139,10 @@ export interface Consultation {
   objective?: string
   assessment?: string
   plan?: string
-  status: string
+  status: ConsultationStatus | string
   scheduledAt?: string
+  startedAt?: string
+  finishedAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -219,6 +228,147 @@ export interface PatientSummary {
   medications: string[]
   allergies: string[]
   recommendations: string
+}
+
+export interface AuthUser {
+  id: string
+  email: string
+  name: string
+  suggestedName: string
+}
+
+export type ConsultationStatus = 'em_espera' | 'em_consulta' | 'finalizado'
+export type ScheduleStatus = 'ativa' | 'inativa'
+
+export interface ScheduleShift {
+  id: string
+  label: string
+  enabled: boolean
+  start: string
+  end: string
+  slots: number
+}
+
+export interface ScheduleAgenda {
+  id: string
+  title: string
+  specialty: string
+  status: ScheduleStatus
+  activeWeekDays: number[]
+  workOnHolidays: boolean
+  appointmentDurationMinutes: number
+  shifts: ScheduleShift[]
+  enabledShiftCount: number
+  maxAppointmentsPerDay: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CalendarAppointment {
+  id: string
+  patientId: string
+  patientName: string
+  scheduledAt: string | null
+  localDateTime: string | null
+  status: ConsultationStatus | string
+  chiefComplaint?: string | null
+  scheduleId?: string | null
+  scheduleTitle?: string | null
+  scheduleSpecialty?: string | null
+}
+
+export interface DashboardStats {
+  patientsCount: number
+  consultationsCount: number
+  waitingConsultationsCount: number
+  inProgressConsultationsCount: number
+  completedConsultationsCount: number
+  todayAppointmentsCount: number
+}
+
+export interface ScheduleAgendaSummary extends ScheduleAgenda {
+  appointmentsThisMonthCount: number
+  todayAppointmentsCount: number
+  nextAppointment: CalendarAppointment | null
+}
+
+export interface ScheduleDashboardResponse {
+  month: string
+  agendas: ScheduleAgendaSummary[]
+  stats: DashboardStats
+}
+
+export interface ScheduleAgendasResponse {
+  agendas: ScheduleAgenda[]
+}
+
+export interface ScheduleAgendaResponse {
+  agenda: ScheduleAgenda
+}
+
+export interface ScheduleAgendaCalendarResponse {
+  month: string
+  agenda: ScheduleAgenda
+  appointments: CalendarAppointment[]
+  stats: {
+    scheduledThisMonthCount: number
+    waitingConsultationsCount: number
+    completedConsultationsCount: number
+    todayAppointmentsCount: number
+  }
+}
+
+export interface ScheduleSlot {
+  shiftId: string
+  shiftLabel: string
+  label: string
+  localDateTime: string
+  isoDateTime: string
+  available: boolean
+  appointment: CalendarAppointment | null
+}
+
+export interface ScheduleAgendaSlotsResponse {
+  date: string
+  allowed: boolean
+  reason: string | null
+  isHoliday: boolean
+  agenda: ScheduleAgenda
+  enabledShiftCount: number
+  maxAppointmentsPerDay: number
+  occupiedCount: number
+  slots: ScheduleSlot[]
+  appointments: CalendarAppointment[]
+}
+
+export interface ScheduleSettings
+  extends Pick<
+    ScheduleAgenda,
+    'activeWeekDays' | 'workOnHolidays' | 'appointmentDurationMinutes' | 'shifts'
+  > {}
+
+export interface ScheduleCalendarResponse {
+  month: string
+  settings: ScheduleAgenda
+  enabledShiftCount: number
+  appointments: CalendarAppointment[]
+  stats: {
+    patientsCount: number
+    consultationsCount: number
+    todayAppointmentsCount: number
+    completedConsultationsCount: number
+    scheduledThisMonthCount: number
+  }
+}
+
+export interface ScheduleSettingsResponse {
+  settings: ScheduleAgenda
+  enabledShiftCount: number
+  maxAppointmentsPerDay: number
+}
+
+export interface ScheduleSlotsResponse extends ScheduleAgendaSlotsResponse {
+  settings: ScheduleAgenda
 }
 
 export type TabId =

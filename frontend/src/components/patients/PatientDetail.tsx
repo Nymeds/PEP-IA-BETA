@@ -1,43 +1,31 @@
 'use client'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/services/api'
-import { ArrowLeft, Plus, Stethoscope, Pencil, Trash2, CalendarClock, X, Sparkles, Loader2, AlertTriangle, Pill, Activity } from 'lucide-react'
+import { ArrowLeft, Stethoscope, Pencil, Trash2, CalendarClock, Sparkles, Loader2, AlertTriangle, Pill, Activity } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useState } from 'react'
 import { format, calcAge } from '../shared/utils'
 
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
-  scheduled: { label: 'Agendada', cls: 'bg-blue-50 text-blue-600' },
-  active: { label: 'Em andamento', cls: 'bg-amber-50 text-amber-600' },
+  scheduled: { label: 'Em espera', cls: 'bg-blue-50 text-blue-600' },
+  em_espera: { label: 'Em espera', cls: 'bg-blue-50 text-blue-600' },
+  active: { label: 'Em consulta', cls: 'bg-amber-50 text-amber-600' },
+  em_consulta: { label: 'Em consulta', cls: 'bg-amber-50 text-amber-600' },
+  finalizado: { label: 'Finalizada', cls: 'bg-green-50 text-green-600' },
   completed: { label: 'Concluída', cls: 'bg-green-50 text-green-600' },
 }
 
 export function PatientDetail({ patientId }: { patientId: string }) {
   const router = useRouter()
   const qc = useQueryClient()
-  const [showSchedule, setShowSchedule] = useState(false)
-  const [scheduleAt, setScheduleAt] = useState('')
 
   const { data: patient, isLoading } = useQuery({
     queryKey: ['patients', patientId],
     queryFn: () => api.patients.get(patientId),
   })
 
-  const createConsultation = useMutation({
-    mutationFn: () => api.consultations.create(patientId),
-    onSuccess: (c) => router.push(`/consultations/${c.id}`),
-  })
 
   // Agenda uma consulta para data futura (não entra no atendimento agora)
-  const scheduleConsultation = useMutation({
-    mutationFn: () => api.consultations.create(patientId, new Date(scheduleAt).toISOString()),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['patients', patientId] })
-      setShowSchedule(false)
-      setScheduleAt('')
-    },
-  })
 
   const deletePatient = useMutation({
     mutationFn: () => api.patients.delete(patientId),
@@ -89,50 +77,11 @@ export function PatientDetail({ patientId }: { patientId: string }) {
             {summary.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
             Resumo IA
           </button>
-          <button onClick={() => setShowSchedule(true)} className="btn-secondary">
-            <CalendarClock className="w-4 h-4" /> Agendar
-          </button>
-          <button
-            onClick={() => createConsultation.mutate()}
-            disabled={createConsultation.isPending}
-            className="btn-primary"
-          >
-            <Plus className="w-4 h-4" />
-            {createConsultation.isPending ? 'Criando...' : 'Nova Consulta'}
-          </button>
+          <Link href="/" className="btn-primary">
+            <CalendarClock className="w-4 h-4" /> Ir para agendas
+          </Link>
         </div>
       </div>
-
-      {showSchedule && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setShowSchedule(false)}>
-          <div className="card p-6 w-full max-w-sm animate-slide-up" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-semibold text-slate-800">Agendar Consulta</h3>
-              <button onClick={() => setShowSchedule(false)} className="text-slate-400 hover:text-slate-600">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <label className="form-label">Data e hora</label>
-            <input
-              type="datetime-local"
-              value={scheduleAt}
-              onChange={(e) => setScheduleAt(e.target.value)}
-              className="form-input mb-4"
-            />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setShowSchedule(false)} className="btn-secondary">Cancelar</button>
-              <button
-                onClick={() => scheduleConsultation.mutate()}
-                disabled={!scheduleAt || scheduleConsultation.isPending}
-                className="btn-primary"
-              >
-                <CalendarClock className="w-4 h-4" />
-                {scheduleConsultation.isPending ? 'Agendando...' : 'Agendar'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="card p-4">
@@ -242,18 +191,15 @@ export function PatientDetail({ patientId }: { patientId: string }) {
           <div className="p-8 text-center">
             <Stethoscope className="w-10 h-10 text-slate-200 mx-auto mb-3" />
             <p className="text-sm text-slate-400">Nenhuma consulta registrada</p>
-            <button
-              onClick={() => createConsultation.mutate()}
-              className="btn-primary mt-4"
-            >
-              <Plus className="w-4 h-4" /> Iniciar Consulta
-            </button>
+            <Link href="/" className="btn-primary mt-4">
+              <CalendarClock className="w-4 h-4" /> Agendar pela agenda
+            </Link>
           </div>
         ) : (
           <div className="divide-y divide-slate-50">
             {patient.consultations.map((c) => {
-              const badge = STATUS_BADGE[c.status] || STATUS_BADGE.active
-              const isScheduled = c.status === 'scheduled'
+              const badge = STATUS_BADGE[c.status] || STATUS_BADGE.em_espera
+              const isScheduled = c.status === 'scheduled' || c.status === 'em_espera'
               return (
                 <Link
                   key={c.id}

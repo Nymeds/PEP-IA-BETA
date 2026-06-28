@@ -1,8 +1,9 @@
 'use client'
 import { Consultation } from '@/types'
 import { RecordingState } from '@/hooks/useAudioRecorder'
-import { ArrowLeft, Save, FileText, Loader2, CheckCircle2, History } from 'lucide-react'
+import { ArrowLeft, Save, FileText, Loader2, CheckCircle2, History, CalendarClock } from 'lucide-react'
 import Link from 'next/link'
+import { useSession } from '@/components/providers/SessionProvider'
 import { calcAge } from '../shared/utils'
 
 interface Props {
@@ -10,10 +11,12 @@ interface Props {
   isSaving: boolean
   isGeneratingSoap: boolean
   isClosing: boolean
+  isStarting: boolean
   isAutoSaving: boolean
   lastSavedAt: Date | null
   recordingState: RecordingState
   onSave: () => void
+  onStart: () => void
   onFinalize: () => void
   onClose: () => void
   onOpenConversation: () => void
@@ -24,16 +27,21 @@ export function ConsultationHeader({
   isSaving,
   isGeneratingSoap,
   isClosing,
+  isStarting,
   isAutoSaving,
   lastSavedAt,
   recordingState,
   onSave,
+  onStart,
   onFinalize,
   onClose,
   onOpenConversation,
 }: Props) {
   const patient = consultation.patient
-  const isCompleted = consultation.status === 'completed'
+  const isWaiting = consultation.status === 'em_espera' || consultation.status === 'scheduled'
+  const isInProgress = consultation.status === 'em_consulta' || consultation.status === 'active'
+  const isCompleted = consultation.status === 'finalizado' || consultation.status === 'completed'
+  const { user } = useSession()
 
   return (
     <header className="bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-4 flex-shrink-0 z-10">
@@ -54,6 +62,7 @@ export function ConsultationHeader({
               {patient?.name || 'Paciente'}
             </p>
             <div className="flex items-center gap-2 text-xs text-slate-400">
+              {user?.suggestedName && <span>Sessao de {user.suggestedName}</span>}
               {patient?.birthDate && <span>{calcAge(patient.birthDate)}</span>}
               {patient?.sex && <span>· {patient.sex}</span>}
               {patient?.allergies && (
@@ -90,7 +99,7 @@ export function ConsultationHeader({
           <span className="hidden md:inline">Conversa</span>
         </button>
 
-        {recordingState === 'idle' && !isGeneratingSoap && (
+        {recordingState === 'idle' && !isGeneratingSoap && isInProgress && (
           <button
             onClick={onFinalize}
             className="btn-secondary text-sm gap-2"
@@ -121,7 +130,12 @@ export function ConsultationHeader({
           <span className="hidden sm:inline">{isSaving ? 'Salvando...' : 'Salvar'}</span>
         </button>
 
-        {isCompleted ? (
+        {isWaiting ? (
+          <button onClick={onStart} disabled={isStarting} className="btn-primary text-sm">
+            {isStarting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CalendarClock className="w-4 h-4" />}
+            <span className="hidden sm:inline">{isStarting ? 'Iniciando...' : 'Iniciar Consulta'}</span>
+          </button>
+        ) : isCompleted ? (
           <span className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-green-600 bg-green-50 rounded-lg">
             <CheckCircle2 className="w-4 h-4" /> Encerrada
           </span>

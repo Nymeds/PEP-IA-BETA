@@ -8,6 +8,7 @@ import {
   saveAudio,
   finalizeConsultation,
   closeConsultation,
+  startConsultation,
   listPatientConsultations,
   streamAudio,
   getConversationTopics,
@@ -19,6 +20,7 @@ export async function consultationsRoutes(fastify: FastifyInstance) {
   fastify.post('/', createConsultation)
   fastify.get('/:id', getConsultation)
   fastify.put('/:id', updateConsultation)
+  fastify.post('/:id/start', startConsultation)
   fastify.post('/:id/transcribe', transcribeChunk)
   fastify.post('/:id/reinterpret', reinterpretConsultation)
   fastify.post('/:id/audio', saveAudio)

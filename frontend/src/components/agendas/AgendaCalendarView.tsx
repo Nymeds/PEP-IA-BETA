@@ -5,42 +5,34 @@ import { startTransition, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   CalendarPlus,
-  CalendarRange,
   ChevronLeft,
   ChevronRight,
-  ClipboardList,
+  CircleCheck,
+  Clock3,
   Stethoscope,
-  TrendingUp,
-  Users,
 } from 'lucide-react'
 import { api } from '@/services/api'
-import { useSession } from '@/components/providers/SessionProvider'
-import { CalendarAppointment, ScheduleCalendarResponse } from '@/types'
-import { cn, format } from '../shared/utils'
+import { CalendarAppointment } from '@/types'
+import { cn } from '../shared/utils'
 import {
   buildMonthGrid,
   dateToInput,
+  formatDateTimeLabel,
   formatMonthHeading,
   monthToInput,
   shiftMonth,
   WEEKDAY_LABELS,
-} from './calendar-utils'
-import { QuickScheduleModal } from './QuickScheduleModal'
+} from '../dashboard/calendar-utils'
+import { AgendaQuickScheduleModal } from './AgendaQuickScheduleModal'
 
-export function DashboardContent() {
-  const { user } = useSession()
+export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
   const [month, setMonth] = useState(() => monthToInput(new Date()))
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [quickModalOpen, setQuickModalOpen] = useState(false)
 
-  const calendarQuery = useQuery<ScheduleCalendarResponse>({
-    queryKey: ['schedule-calendar', month],
-    queryFn: () => api.schedule.calendar(month),
-  })
-
-  const patientsQuery = useQuery({
-    queryKey: ['patients', 'dashboard'],
-    queryFn: () => api.patients.list(),
+  const calendarQuery = useQuery({
+    queryKey: ['agenda-calendar', agendaId, month],
+    queryFn: () => api.schedule.agendaCalendar(agendaId, month),
   })
 
   const appointmentsByDate = useMemo(() => {
@@ -56,42 +48,13 @@ export function DashboardContent() {
   }, [calendarQuery.data?.appointments])
 
   const monthDays = useMemo(() => buildMonthGrid(month), [month])
-  const recentPatients = useMemo(() => {
-    return [...(patientsQuery.data || [])]
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-      .slice(0, 5)
-  }, [patientsQuery.data])
-
-  const stats = [
-    {
-      label: 'Pacientes',
-      value: calendarQuery.data?.stats.patientsCount ?? 0,
-      icon: Users,
-      color: 'text-blue-600 bg-blue-50',
-    },
-    {
-      label: 'Consultas',
-      value: calendarQuery.data?.stats.consultationsCount ?? 0,
-      icon: ClipboardList,
-      color: 'text-emerald-600 bg-emerald-50',
-    },
-    {
-      label: 'Agenda de hoje',
-      value: calendarQuery.data?.stats.todayAppointmentsCount ?? 0,
-      icon: CalendarRange,
-      color: 'text-amber-600 bg-amber-50',
-    },
-    {
-      label: 'Concluidas',
-      value: calendarQuery.data?.stats.completedConsultationsCount ?? 0,
-      icon: TrendingUp,
-      color: 'text-cyan-600 bg-cyan-50',
-    },
-  ]
+  const agenda = calendarQuery.data?.agenda
+  const isActive = agenda?.status === 'ativa'
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
-      <QuickScheduleModal
+      <AgendaQuickScheduleModal
+        agendaId={agendaId}
         open={quickModalOpen}
         date={selectedDate}
         onClose={() => setQuickModalOpen(false)}
@@ -99,16 +62,37 @@ export function DashboardContent() {
 
       <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-8">
         <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-primary-600 mb-2">Dashboard medico</p>
-          <h1 className="text-3xl font-bold text-slate-900">
-            Bem-vindo, {user?.suggestedName || user?.name}
-          </h1>
+          <Link href="/" className="text-xs text-primary-600 hover:text-primary-700">
+            Voltar ao dashboard
+          </Link>
+          <div className="flex items-center gap-3 mt-2">
+            <h1 className="text-3xl font-bold text-slate-900">
+              {agenda?.title || 'Agenda'}
+            </h1>
+            {agenda && (
+              <span
+                className={
+                  isActive
+                    ? 'px-2.5 py-1 rounded-full text-xs bg-emerald-50 text-emerald-700'
+                    : 'px-2.5 py-1 rounded-full text-xs bg-slate-100 text-slate-500'
+                }
+              >
+                {isActive ? 'Ativa' : 'Inativa'}
+              </span>
+            )}
+          </div>
           <p className="text-sm text-slate-500 mt-2 max-w-2xl">
-            Acompanhe o calendario da consulta, configure os turnos da agenda e marque pacientes em poucos cliques.
+            {agenda?.specialty
+              ? `${agenda.specialty}. Clique em um dia para abrir o helper de agendamento rapido.`
+              : 'Carregando dados da agenda...'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          <Link href="/settings" className="btn-secondary">
+            <Stethoscope className="w-4 h-4" />
+            Editar agenda
+          </Link>
           <button
             onClick={() => {
               setSelectedDate(dateToInput(new Date()))
@@ -117,25 +101,9 @@ export function DashboardContent() {
             className="btn-primary"
           >
             <CalendarPlus className="w-4 h-4" />
-            Agendar rapido
+            Agendar neste mes
           </button>
-          <Link href="/settings" className="btn-secondary">
-            <Stethoscope className="w-4 h-4" />
-            Configurar agenda
-          </Link>
         </div>
-      </div>
-
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
-        {stats.map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="card p-4">
-            <div className={`w-11 h-11 rounded-2xl ${color} flex items-center justify-center mb-3`}>
-              <Icon className="w-5 h-5" />
-            </div>
-            <p className="text-2xl font-bold text-slate-900">{value}</p>
-            <p className="text-xs text-slate-500 mt-1">{label}</p>
-          </div>
-        ))}
       </div>
 
       <div className="grid xl:grid-cols-[1.35fr_0.65fr] gap-6">
@@ -146,7 +114,7 @@ export function DashboardContent() {
                 {formatMonthHeading(month)}
               </h2>
               <p className="text-sm text-slate-500 mt-1">
-                Clique em qualquer dia para abrir o helper de agendamento.
+                Dias e horarios respeitam turnos, feriados e o status ativo da agenda.
               </p>
             </div>
 
@@ -175,7 +143,10 @@ export function DashboardContent() {
           <div className="px-4 py-4">
             <div className="grid grid-cols-7 gap-2 mb-2">
               {WEEKDAY_LABELS.map((label) => (
-                <div key={label} className="px-2 py-2 text-xs font-semibold text-slate-400 uppercase tracking-[0.16em]">
+                <div
+                  key={label}
+                  className="px-2 py-2 text-xs font-semibold text-slate-400 uppercase tracking-[0.16em]"
+                >
                   {label}
                 </div>
               ))}
@@ -229,7 +200,8 @@ export function DashboardContent() {
                             {appointment.patientName}
                           </p>
                           <p className="text-[11px] text-slate-500 truncate">
-                            {appointment.localDateTime?.slice(11, 16)} {appointment.chiefComplaint ? `· ${appointment.chiefComplaint}` : ''}
+                            {appointment.localDateTime?.slice(11, 16)}{' '}
+                            {appointment.chiefComplaint ? `· ${appointment.chiefComplaint}` : ''}
                           </p>
                         </Link>
                       ))}
@@ -247,80 +219,86 @@ export function DashboardContent() {
         </div>
 
         <div className="space-y-6">
-          <div className="card">
-            <div className="px-5 py-4 border-b border-slate-100">
-              <h2 className="text-sm font-semibold text-slate-800">Resumo da agenda</h2>
-            </div>
-            <div className="p-5 space-y-3">
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold text-slate-800 mb-4">Resumo operacional</h2>
+            <div className="space-y-3">
               <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
                 <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Turnos ativos</p>
                 <p className="text-sm font-semibold text-slate-900 mt-1">
-                  {calendarQuery.data?.enabledShiftCount ?? 0} turno(s)
+                  {agenda?.enabledShiftCount ?? 0} turno(s)
                 </p>
               </div>
               <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Agendados no mes</p>
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Dias por semana</p>
+                <p className="text-sm font-semibold text-slate-900 mt-1">
+                  {agenda?.activeWeekDays.length ?? 0} dia(s)
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Agendadas no mes</p>
                 <p className="text-sm font-semibold text-slate-900 mt-1">
                   {calendarQuery.data?.stats.scheduledThisMonthCount ?? 0} consulta(s)
                 </p>
               </div>
               <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Dias de atendimento</p>
+                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Finalizadas</p>
                 <p className="text-sm font-semibold text-slate-900 mt-1">
-                  {(calendarQuery.data?.settings.activeWeekDays.length || 0)} dia(s) por semana
-                </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  {calendarQuery.data?.settings.workOnHolidays
-                    ? 'Feriados habilitados'
-                    : 'Feriados desabilitados'}
+                  {calendarQuery.data?.stats.completedConsultationsCount ?? 0} consulta(s)
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="card">
-            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-800">Pacientes recentes</h2>
-              <Link href="/patients" className="text-xs text-primary-600 hover:text-primary-700">
-                Ver todos
-              </Link>
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold text-slate-800 mb-4">Status da agenda</h2>
+            <div className="space-y-3">
+              <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <CircleCheck className="w-4 h-4 text-emerald-600" />
+                  <p className="text-sm font-medium text-slate-800">Agenda ativa</p>
+                </div>
+                <p className="text-xs text-slate-500">
+                  {isActive
+                    ? 'Esta agenda pode receber novos agendamentos.'
+                    : 'Enquanto estiver inativa, nenhum novo horario sera liberado.'}
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <Clock3 className="w-4 h-4 text-amber-600" />
+                  <p className="text-sm font-medium text-slate-800">Consultas em espera</p>
+                </div>
+                <p className="text-xs text-slate-500">
+                  {calendarQuery.data?.stats.waitingConsultationsCount ?? 0} consulta(s) aguardando inicio.
+                </p>
+              </div>
             </div>
-
-            {!recentPatients.length ? (
-              <div className="p-8 text-center">
-                <Users className="w-10 h-10 text-slate-200 mx-auto mb-3" />
-                <p className="text-sm text-slate-400">Nenhum paciente cadastrado</p>
-                <Link href="/patients/new" className="btn-primary mt-4">
-                  Cadastrar paciente
-                </Link>
-              </div>
-            ) : (
-              <div className="divide-y divide-slate-50">
-                {recentPatients.map((patient) => {
-                  const lastConsultation = patient.consultations?.[0]
-                  return (
-                    <Link
-                      key={patient.id}
-                      href={`/patients/${patient.id}`}
-                      className="flex items-center justify-between gap-3 px-5 py-3.5 hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-slate-800 truncate">{patient.name}</p>
-                        <p className="text-xs text-slate-400">
-                          {lastConsultation
-                            ? `Ultima movimentacao: ${format(lastConsultation.scheduledAt || lastConsultation.createdAt)}`
-                            : 'Sem consultas'}
-                        </p>
-                      </div>
-                      <span className="text-xs text-slate-400 whitespace-nowrap">
-                        {patient.quickCreated ? 'Rapido' : patient.phone || '—'}
-                      </span>
-                    </Link>
-                  )
-                })}
-              </div>
-            )}
           </div>
+
+          {calendarQuery.data?.appointments?.length ? (
+            <div className="card p-5">
+              <h2 className="text-sm font-semibold text-slate-800 mb-4">Proximos agendamentos</h2>
+              <div className="space-y-2">
+                {calendarQuery.data.appointments.slice(0, 5).map((appointment) => (
+                  <Link
+                    key={appointment.id}
+                    href={`/consultations/${appointment.id}`}
+                    className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-3 hover:border-primary-300 hover:bg-primary-50/40 transition-colors"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-slate-800">{appointment.patientName}</p>
+                      <p className="text-xs text-slate-500">
+                        {appointment.chiefComplaint || 'Consulta agendada'}
+                      </p>
+                    </div>
+                    <span className="text-xs text-slate-500">
+                      {formatDateTimeLabel(appointment.scheduledAt)}
+                    </span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 

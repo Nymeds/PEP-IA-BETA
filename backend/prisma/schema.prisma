@@ -7,9 +7,58 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  suggestedName String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  patients         Patient[]
+  consultations    Consultation[]
+  schedules        Schedule[]
+}
+
+model Schedule {
+  id                         String   @id @default(cuid())
+  userId                     String
+  title                      String
+  specialty                  String
+  status                     String   @default("ativa")
+  activeWeekDaysJson         String   @default("[1,2,3,4,5]")
+  workOnHolidays             Boolean  @default(false)
+  appointmentDurationMinutes Int      @default(30)
+  shiftsJson                 String   @default("[{\"id\":\"manha\",\"label\":\"Manhã\",\"enabled\":true,\"start\":\"08:00\",\"end\":\"12:00\",\"slots\":8},{\"id\":\"tarde\",\"label\":\"Tarde\",\"enabled\":true,\"start\":\"13:00\",\"end\":\"17:00\",\"slots\":8},{\"id\":\"noite\",\"label\":\"Noite\",\"enabled\":false,\"start\":\"18:00\",\"end\":\"21:00\",\"slots\":6}]")
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consultations Consultation[]
+
+  @@index([userId, status])
+  @@index([userId, specialty])
+}
+
+model LegacyScheduleSettings {
+  id                         String   @id
+  userId                     String   @unique
+  activeWeekDaysJson         String
+  workOnHolidays             Boolean
+  appointmentDurationMinutes Int
+  shiftsJson                 String
+  createdAt                  DateTime
+  updatedAt                  DateTime
+
+  @@map("ScheduleSettings")
+}
+
 model Patient {
   id            String   @id @default(cuid())
+  userId        String?
   name          String
+  quickCreated  Boolean  @default(false)
   socialName    String?
   cpf           String?
   rg            String?
@@ -34,12 +83,17 @@ model Patient {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   consultations Consultation[]
+
+  @@index([userId, name])
 }
 
 model Consultation {
-  id        String @id @default(cuid())
-  patientId String
+  id         String @id @default(cuid())
+  userId     String?
+  patientId  String
+  scheduleId String?
 
   // Armazenamento de áudio e transcrição
   audioPath  String?
@@ -102,14 +156,23 @@ model Consultation {
   assessment String?
   plan       String?
 
-  // status: "scheduled" (agendada) | "active" (em atendimento) | "completed" (encerrada)
-  status      String    @default("active")
+  // status: "em_espera" | "em_consulta" | "finalizado"
+  status      String    @default("em_espera")
   scheduledAt DateTime?
+  startedAt   DateTime?
+  finishedAt  DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  patient  Patient                @relation(fields: [patientId], references: [id])
+  user     User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  patient  Patient                @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  schedule Schedule?              @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   versions ConsultationVersion[]
+
+  @@index([userId, scheduledAt])
+  @@index([userId, status])
+  @@index([scheduleId, scheduledAt])
+  @@index([patientId])
 }
 
 // Histórico de versões do prontuário — cada correção gera uma versão NOVA,
