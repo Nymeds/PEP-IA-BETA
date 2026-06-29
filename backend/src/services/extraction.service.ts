@@ -1,4 +1,10 @@
 import OpenAI from 'openai'
+import {
+  clinicalExtractionSchema,
+  jsonSchemaResponseFormat,
+  removeNullishAndEmpty,
+} from './openai-schemas'
+import { recordAiUsage } from './ai-usage.service'
 
 let _openai: OpenAI | null = null
 const getOpenAI = () => {
@@ -6,73 +12,15 @@ const getOpenAI = () => {
   return _openai
 }
 
-const SYSTEM_PROMPT = `Você é um assistente médico especializado em extrair informações clínicas de transcrições de consultas médicas em português.
+const SYSTEM_PROMPT = `Voce e um assistente medico especializado em extrair dados clinicos de consultas em portugues do Brasil.
 
-Você recebe a transcrição COMPLETA de uma consulta médica até o momento atual. Releia TODA a transcrição e produza o estado CONSOLIDADO de todos os campos clínicos.
-
-REGRAS IMPORTANTES:
-- Distribua cada informação no campo correto, com base no que aquele campo representa clinicamente.
-- Se o paciente mencionou algo relevante em QUALQUER ponto da conversa (mesmo no meio, fora de ordem), capture e coloque no campo certo. Ex: uma dor citada no fim deve ir para os sintomas/HDA.
-- DESCARTE completamente qualquer texto que NÃO seja clínico: ruído, frases sem sentido, conversa fiada, saudações, propaganda, conteúdo de vídeo, ou qualquer coisa que claramente não faça parte da consulta.
-- Se uma informação não for clínica ou não for interessante para o prontuário, simplesmente ignore.
-- Retorne o estado COMPLETO e atualizado de todos os campos com informação (não incremental). Omita campos que não têm informação clara.
-- Não invente nada. Só registre o que foi realmente dito.
-
-Retorne SOMENTE um objeto JSON válido, sem texto adicional, sem markdown, apenas o JSON puro.
-
-Campos disponíveis:
-{
-  "chiefComplaint": "queixa principal em poucas palavras",
-  "hda": "história da doença atual - descrição cronológica dos sintomas",
-  "symptomStart": "início dos sintomas (ex: há 4 dias, desde segunda-feira)",
-  "symptomIntensity": "intensidade de 0 a 10 ou descrição",
-  "symptoms": ["lista de sintomas mencionados"],
-  "improvingFactors": "o que melhora os sintomas",
-  "worseningFactors": "o que piora os sintomas",
-  "previousDiseases": ["doenças prévias"],
-  "surgeries": ["cirurgias anteriores"],
-  "hospitalizations": ["internações anteriores"],
-  "allergiesDetails": [{"substance": "substância", "reaction": "tipo de reação"}],
-  "currentMedications": [{"name": "nome", "dose": "dose", "frequency": "frequência", "route": "via"}],
-  "familyHistory": {"diabetes": false, "hypertension": false, "stroke": false, "cancer": false, "heartDisease": false},
-  "smoking": "não fumante / fumante X cigarros/dia / ex-fumante",
-  "alcohol": "não bebe / uso social / uso frequente",
-  "physicalActivity": "descrição da atividade física",
-  "sleep": "qualidade e quantidade do sono",
-  "diet": "hábitos alimentares",
-  "occupation": "profissão/ocupação",
-  "vitalSigns": {"pa": "120/80mmHg", "fc": "70bpm", "fr": "16irpm", "temp": "36.5°C", "spo2": "99%", "glucose": ""},
-  "weight": 70.0,
-  "height": 170.0,
-  "generalState": "bom / regular / ruim",
-  "physicalExam": {
-    "headNeck": "cabeça e pescoço",
-    "cardioRespiratory": "cardiorrespiratório",
-    "abdomen": "abdome",
-    "neurological": "neurológico",
-    "extremities": "extremidades"
-  },
-  "mainHypothesis": "hipótese diagnóstica principal",
-  "differentials": ["diagnósticos diferenciais"],
-  "cid": [{"code": "J06.9", "description": "Infecção aguda das vias aéreas superiores"}],
-  "therapeuticPlan": "plano terapêutico e condutas",
-  "orientations": "orientações dadas ao paciente",
-  "referrals": "encaminhamentos",
-  "systemsReview": {
-    "general": ["Febre", "Calafrios", "Perda de peso", "Fadiga", "Astenia"],
-    "respiratory": ["Tosse", "Dispneia", "Sibilos", "Hemoptise", "Dor torácica"],
-    "cardiovascular": ["Palpitações", "Dor precordial", "Edema", "Síncope", "Ortopneia"],
-    "gastrointestinal": ["Náusea", "Vômito", "Dor abdominal", "Diarreia", "Constipação", "Hematêmese"],
-    "genitourinary": ["Disúria", "Polaciúria", "Hematúria", "Corrimento", "Disfunção erétil"],
-    "neurological": ["Cefaleia", "Tontura", "Convulsões", "Parestesia", "Déficit motor"],
-    "psychiatric": ["Ansiedade", "Depressão", "Insônia", "Alterações de humor", "Alucinações"],
-    "musculoskeletal": ["Artralgia", "Mialgia", "Rigidez articular", "Limitação de movimento"],
-    "dermatological": ["Rash cutâneo", "Prurido", "Icterícia", "Cianose"]
-  },
-  "currentSection": "anamnese | antecedentes | habitos | revisao_sistemas | exame_fisico | diagnostico | conduta"
-}
-
-REGRA ESPECIAL para "systemsReview": liste em cada sistema APENAS os sintomas que o paciente relatou estar PRESENTES, escolhendo EXATAMENTE entre os rótulos listados acima (mesma grafia e acentuação). Ex: se o paciente diz que tem febre e dor de cabeça, retorne {"general": ["Febre"], "neurological": ["Cefaleia"]}. Não inclua sistemas sem sintomas presentes. Mapeie sinônimos para o rótulo correto (ex: "dor de cabeça" → "Cefaleia", "enjoo" → "Náusea", "falta de ar" → "Dispneia").`
+Regras:
+- Use apenas informacoes realmente ditas.
+- Nao invente dados, diagnosticos, doses ou condutas.
+- Ignore ruido, saudacoes e conversa nao clinica.
+- Distribua cada dado no campo clinico correto.
+- Para revisao de sistemas, liste apenas sintomas presentes.
+- Quando nao houver evidencia clara para um campo, preencha null no schema.`
 
 export interface ExtractedData {
   chiefComplaint?: string
@@ -128,39 +76,66 @@ export interface ExtractedData {
   currentSection?: string
 }
 
-// Relê a transcrição COMPLETA e devolve o estado consolidado de todos os campos,
-// descartando ruído e redistribuindo cada informação no campo correto.
-export async function reinterpretFullTranscript(fullTranscript: string): Promise<ExtractedData> {
-  if (!fullTranscript.trim()) return {}
+export interface ExtractionCallOptions {
+  consultationId?: string
+  reason?: string
+  segmentCount?: number
+  model?: string
+}
 
-  const model = process.env.OPENAI_EXTRACTION_MODEL || 'gpt-4o'
-
-  const response = await getOpenAI().chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: `Transcrição completa da consulta até agora:\n\n${fullTranscript}` },
-    ],
-    temperature: 0.1,
-    max_tokens: 3000,
-    response_format: { type: 'json_object' },
-  })
-
-  const content = response.choices[0]?.message?.content || '{}'
-
+function parseExtracted(content: string): ExtractedData {
   try {
     const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    return JSON.parse(cleaned) as ExtractedData
+    return removeNullishAndEmpty(JSON.parse(cleaned)) as ExtractedData
   } catch {
     return {}
   }
 }
 
-// Mantido por compatibilidade — agora aponta para a re-interpretação consolidada.
+// Rele a transcricao completa e devolve o estado consolidado dos campos clinicos.
+export async function reinterpretFullTranscript(
+  fullTranscript: string,
+  options: ExtractionCallOptions = {}
+): Promise<ExtractedData> {
+  if (!fullTranscript.trim()) return {}
+
+  const model = options.model || process.env.OPENAI_EXTRACTION_MODEL || 'gpt-4o'
+  const startedAt = Date.now()
+
+  const response = await getOpenAI().chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: `Transcricao completa da consulta ate agora:\n\n${fullTranscript}` },
+    ],
+    temperature: 0.1,
+    max_tokens: 3000,
+    response_format: jsonSchemaResponseFormat(
+      'clinical_extraction',
+      clinicalExtractionSchema,
+      'Dados clinicos consolidados extraidos da consulta'
+    ),
+  })
+
+  await recordAiUsage(
+    {
+      consultationId: options.consultationId,
+      service: 'clinical_extraction_full',
+      model,
+      reason: options.reason || 'reinterpretacao_completa',
+      segmentCount: options.segmentCount,
+      startedAt,
+    },
+    response.usage
+  )
+
+  return parseExtracted(response.choices[0]?.message?.content || '{}')
+}
+
+// Mantido por compatibilidade.
 export const extractClinicalData = reinterpretFullTranscript
 
-// Converte o ExtractedData (arrays/objetos) para os campos do banco (strings JSON / escalares).
-// Só inclui campos que vieram preenchidos, para nunca apagar dados já existentes.
+// Converte o ExtractedData para os campos do banco. So inclui campos preenchidos.
 export function serializeExtractedToDb(e: ExtractedData): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   const str = (k: string, v?: string) => {
