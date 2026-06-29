@@ -92,6 +92,9 @@ export interface Consultation {
   audioPath?: string
   transcript?: string
   transcriptStructured?: string
+  transcriptSegmentsJson?: string
+  extractionStateJson?: string
+  aiUsageJson?: string
   // Anamnese
   chiefComplaint?: string
   hda?: string
@@ -183,8 +186,45 @@ export interface ExtractedData {
 }
 
 export interface TranscribeResponse {
+  chunkId?: string
+  seq?: number
+  queued?: boolean
   chunkTranscript: string
   fullTranscript: string | null
+}
+
+export interface TranscriptionSegment {
+  id: string
+  seq: number
+  text: string
+  status: 'confirmed' | 'empty' | 'error'
+  startedAtMs?: number
+  endedAtMs?: number
+  size?: number
+  error?: string
+  createdAt: string
+}
+
+export type TranscriptionEventType =
+  | 'connected'
+  | 'chunk_queued'
+  | 'chunk_processing'
+  | 'transcript_done'
+  | 'chunk_error'
+  | 'queue_idle'
+
+export interface TranscriptionEvent {
+  type: TranscriptionEventType
+  clientId?: string
+  chunkId?: string
+  seq?: number
+  text?: string
+  status?: TranscriptionSegment['status']
+  elapsedMs?: number
+  fullTranscript?: string
+  segment?: TranscriptionSegment
+  error?: string
+  size?: number
 }
 
 export interface DialogueTurn {

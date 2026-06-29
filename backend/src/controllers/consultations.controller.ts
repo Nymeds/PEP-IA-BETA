@@ -7,6 +7,12 @@ import { runFinalReview } from '../services/review.service'
 import { suggestTopics } from '../services/analysis.service'
 import { generateSoap } from '../services/soap.service'
 import {
+  enqueueTranscriptionChunk,
+  hasTranscriptionClients,
+  registerTranscriptionClient,
+  waitForTranscriptionIdle,
+} from '../services/transcription-session.service'
+import {
   CONSULTATION_STATUS,
   normalizeConsultationStatus,
 } from '../lib/schedule'
@@ -234,6 +240,31 @@ export async function transcribeChunk(
 
   const buffer = await fileData.toBuffer()
   const mimeType = fileData.mimetype || 'audio/webm'
+
+  if (hasTranscriptionClients(consultation.id, req.authUser!.id)) {
+    const fields = fileData.fields as Record<string, { value?: string }> | undefined
+    const seq = Number(fields?.seq?.value || 0)
+    const startedAtMsRaw = fields?.startedAtMs?.value ? Number(fields.startedAtMs.value) : undefined
+    const endedAtMsRaw = fields?.endedAtMs?.value ? Number(fields.endedAtMs.value) : undefined
+    const accepted = enqueueTranscriptionChunk({
+      consultationId: consultation.id,
+      userId: req.authUser!.id,
+      seq: Number.isFinite(seq) && seq > 0 ? seq : Date.now(),
+      buffer,
+      mimeType,
+      startedAtMs: typeof startedAtMsRaw === 'number' && Number.isFinite(startedAtMsRaw) ? startedAtMsRaw : undefined,
+      endedAtMs: typeof endedAtMsRaw === 'number' && Number.isFinite(endedAtMsRaw) ? endedAtMsRaw : undefined,
+      size: buffer.length,
+    })
+
+    return reply.status(202).send({
+      ...accepted,
+      queued: true,
+      chunkTranscript: '',
+      fullTranscript: consultation.transcript || null,
+    })
+  }
+
   const chunkTranscript = await transcribeAudioBuffer(buffer, mimeType)
 
   if (!chunkTranscript.trim()) {
@@ -249,6 +280,38 @@ export async function transcribeChunk(
   })
 
   return reply.send({ chunkTranscript, fullTranscript })
+}
+
+export async function streamTranscriptionEvents(
+  req: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const consultation = await getPrisma().consultation.findFirst({
+    where: { id: req.params.id, userId: req.authUser!.id },
+    select: { id: true },
+  })
+
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  registerTranscriptionClient(consultation.id, req.authUser!.id, reply)
+}
+
+export async function flushTranscription(
+  req: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const consultation = await getPrisma().consultation.findFirst({
+    where: { id: req.params.id, userId: req.authUser!.id },
+    select: { id: true, transcript: true },
+  })
+
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  await waitForTranscriptionIdle(consultation.id, req.authUser!.id)
+  const updated = await getPrisma().consultation.findUnique({
+    where: { id: consultation.id },
+    select: { transcript: true },
+  })
+
+  return reply.send({ fullTranscript: updated?.transcript || consultation.transcript || null })
 }
 
 export async function reinterpretConsultation(

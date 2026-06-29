@@ -4,6 +4,8 @@ import {
   getConsultation,
   updateConsultation,
   transcribeChunk,
+  streamTranscriptionEvents,
+  flushTranscription,
   reinterpretConsultation,
   saveAudio,
   finalizeConsultation,
@@ -21,7 +23,9 @@ export async function consultationsRoutes(fastify: FastifyInstance) {
   fastify.get('/:id', getConsultation)
   fastify.put('/:id', updateConsultation)
   fastify.post('/:id/start', startConsultation)
+  fastify.get('/:id/transcription-events', streamTranscriptionEvents)
   fastify.post('/:id/transcribe', transcribeChunk)
+  fastify.post('/:id/transcription-flush', flushTranscription)
   fastify.post('/:id/reinterpret', reinterpretConsultation)
   fastify.post('/:id/audio', saveAudio)
   fastify.post('/:id/finalize', finalizeConsultation)
