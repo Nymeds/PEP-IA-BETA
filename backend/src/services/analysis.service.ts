@@ -1,5 +1,4 @@
 import OpenAI from 'openai'
-import { jsonSchemaResponseFormat, patientSummarySchema, topicsSchema } from './openai-schemas'
 
 let _openai: OpenAI | null = null
 const getOpenAI = () => {
@@ -13,10 +12,14 @@ export interface ConversationTopic {
   excerpts: string[]
 }
 
-const TOPICS_PROMPT = `Voce recebe a transcricao de uma consulta medica em portugues.
+const TOPICS_PROMPT = `Você recebe a transcrição de uma consulta médica em português.
 
-Identifique topicos clinicos discutidos, com titulo curto, resumo de uma linha e trechos literais relacionados.
-Nao invente trechos.`
+Identifique os TÓPICOS discutidos (ex: Queixa principal, História da doença, Antecedentes, Medicações, Exame físico, Diagnóstico, Conduta, etc.).
+
+Para cada tópico, traga um título curto, um resumo de 1 linha e os trechos LITERAIS da transcrição relacionados.
+
+Retorne SOMENTE JSON válido:
+{ "topics": [ { "title": "...", "summary": "...", "excerpts": ["trecho literal 1", "trecho literal 2"] } ] }`
 
 export async function suggestTopics(transcript: string): Promise<ConversationTopic[]> {
   if (!transcript.trim()) return []
@@ -26,15 +29,11 @@ export async function suggestTopics(transcript: string): Promise<ConversationTop
     model,
     messages: [
       { role: 'system', content: TOPICS_PROMPT },
-      { role: 'user', content: `Transcricao:\n\n${transcript}` },
+      { role: 'user', content: `Transcrição:\n\n${transcript}` },
     ],
     temperature: 0.2,
-    max_tokens: 2200,
-    response_format: jsonSchemaResponseFormat(
-      'conversation_topics',
-      topicsSchema,
-      'Topicos clinicos discutidos na consulta'
-    ),
+    max_tokens: 3000,
+    response_format: { type: 'json_object' },
   })
 
   try {
@@ -68,10 +67,20 @@ export interface PatientSummary {
   recommendations: string
 }
 
-const SUMMARY_PROMPT = `Voce e um medico revisando o historico completo de um paciente antes de um atendimento.
+const SUMMARY_PROMPT = `Você é um médico revisando o histórico completo de um paciente antes de um atendimento.
 
-Produza resumo clinico consolidado, sem inventar dados.
-Se uma informacao nao constar, deixe a lista vazia ou indique ausencia.`
+Com base nos atendimentos anteriores fornecidos (em ordem cronológica), produza um RESUMO CLÍNICO consolidado para dar contexto rápido ao médico.
+
+Retorne SOMENTE JSON válido:
+{
+  "overview": "parágrafo resumindo a trajetória do paciente, queixas recorrentes e evolução",
+  "activeProblems": ["problemas/diagnósticos ativos ou recorrentes"],
+  "medications": ["medicações em uso relevantes ao longo do histórico"],
+  "allergies": ["alergias conhecidas"],
+  "recommendations": "pontos de atenção e o que o médico deveria revisar/perguntar neste atendimento"
+}
+
+Não invente dados. Se algo não constar, deixe a lista vazia ou indique a ausência.`
 
 export async function summarizePatient(input: PatientSummaryInput): Promise<PatientSummary> {
   const model = process.env.OPENAI_EXTRACTION_MODEL || 'gpt-4o'
@@ -81,10 +90,10 @@ export async function summarizePatient(input: PatientSummaryInput): Promise<Pati
       const parts = [
         `Atendimento ${i + 1} (${c.date}):`,
         c.chiefComplaint ? `  Queixa: ${c.chiefComplaint}` : '',
-        c.mainHypothesis ? `  Hipotese: ${c.mainHypothesis}` : '',
-        c.assessment ? `  Avaliacao: ${c.assessment}` : '',
+        c.mainHypothesis ? `  Hipótese: ${c.mainHypothesis}` : '',
+        c.assessment ? `  Avaliação: ${c.assessment}` : '',
         c.plan ? `  Conduta: ${c.plan}` : '',
-        c.currentMedications ? `  Medicacoes: ${c.currentMedications}` : '',
+        c.currentMedications ? `  Medicações: ${c.currentMedications}` : '',
         c.allergiesDetails ? `  Alergias: ${c.allergiesDetails}` : '',
       ].filter(Boolean)
       return parts.join('\n')
@@ -95,26 +104,16 @@ export async function summarizePatient(input: PatientSummaryInput): Promise<Pati
     model,
     messages: [
       { role: 'system', content: SUMMARY_PROMPT },
-      { role: 'user', content: `Paciente: ${input.name}\n\nHistorico de atendimentos:\n\n${consultationsText}` },
+      { role: 'user', content: `Paciente: ${input.name}\n\nHistórico de atendimentos:\n\n${consultationsText}` },
     ],
     temperature: 0.2,
-    max_tokens: 1600,
-    response_format: jsonSchemaResponseFormat(
-      'patient_summary',
-      patientSummarySchema,
-      'Resumo clinico consolidado do paciente'
-    ),
+    max_tokens: 2000,
+    response_format: { type: 'json_object' },
   })
 
   try {
     return JSON.parse(response.choices[0]?.message?.content || '{}') as PatientSummary
   } catch {
-    return {
-      overview: 'Nao foi possivel gerar o resumo.',
-      activeProblems: [],
-      medications: [],
-      allergies: [],
-      recommendations: '',
-    }
+    return { overview: 'Não foi possível gerar o resumo.', activeProblems: [], medications: [], allergies: [], recommendations: '' }
   }
 }

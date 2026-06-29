@@ -7,23 +7,11 @@ interface Props {
   recordingState: RecordingState
   transcript: string
   isInterpreting?: boolean
-  pendingChunks?: number
-  transcriptionStatus?: string
-  transcriptionError?: string | null
   onStart: () => void
   onStop: () => void
 }
 
-export function RecordingBar({
-  recordingState,
-  transcript,
-  isInterpreting,
-  pendingChunks = 0,
-  transcriptionStatus,
-  transcriptionError,
-  onStart,
-  onStop,
-}: Props) {
+export function RecordingBar({ recordingState, transcript, isInterpreting, onStart, onStop }: Props) {
   const transcriptRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -57,18 +45,9 @@ export function RecordingBar({
 
       <div className="flex items-center justify-center gap-4 px-6 py-4">
         {isRecording && (
-          <div className="flex flex-col gap-1 min-w-0">
-            <div className="flex items-center gap-2 text-red-500 text-sm font-medium">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              Gravando...
-            </div>
-            <div className="text-xs text-slate-500 max-w-64 truncate">
-              {transcriptionStatus || 'Captando audio'}
-              {pendingChunks > 0 ? ` · ${pendingChunks} trecho(s) na fila` : ''}
-            </div>
-            {transcriptionError && (
-              <div className="text-xs text-amber-600 max-w-64 truncate">{transcriptionError}</div>
-            )}
+          <div className="flex items-center gap-2 text-red-500 text-sm font-medium">
+            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            Gravando...
           </div>
         )}
 

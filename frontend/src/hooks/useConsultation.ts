@@ -175,10 +175,6 @@ export function useConsultation(initialConsultation: Consultation) {
     setTranscript((prev) => (prev ? `${prev}\n${chunk}` : chunk))
   }, [])
 
-  const applyTranscript = useCallback((value: string) => {
-    setTranscript(value)
-  }, [])
-
   const applySoap = useCallback(
     (soap: { subjective: string; objective: string; assessment: string; plan: string }) => {
       setConsultation((prev) => ({ ...prev, ...soap }))
@@ -258,7 +254,6 @@ export function useConsultation(initialConsultation: Consultation) {
     lastSavedAt,
     mergeExtracted,
     addTranscript,
-    applyTranscript,
     applySoap,
     saveConsultation,
     updateField,

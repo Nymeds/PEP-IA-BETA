@@ -1,8 +1,5 @@
 import OpenAI from 'openai'
-import { createReadStream, existsSync } from 'fs'
 import { ExtractedData, reinterpretFullTranscript } from './extraction.service'
-import { diarizationSchema, jsonSchemaResponseFormat } from './openai-schemas'
-import { recordAiUsage } from './ai-usage.service'
 
 let _openai: OpenAI | null = null
 const getOpenAI = () => {
@@ -15,96 +12,47 @@ export interface DialogueTurn {
   text: string
 }
 
-interface ReviewOptions {
-  consultationId?: string
-  audioPath?: string | null
-}
+const DIARIZATION_PROMPT = `Você recebe a transcrição corrida (sem identificação de quem fala) de uma consulta médica em português.
 
-const DIARIZATION_PROMPT = `Voce recebe uma transcricao corrida de consulta medica em portugues.
+Sua tarefa: reorganizar o texto em TURNOS de fala, identificando QUEM disse cada trecho.
 
-Separe em turnos de fala, identificando Medico, Paciente ou Indefinido.
-Nao invente, nao resuma e nao altere o conteudo clinico.`
+Como identificar:
+- MÉDICO: faz perguntas, conduz a anamnese, orienta, explica, pede exames, descreve achados do exame físico, dá diagnóstico e conduta.
+- PACIENTE: relata sintomas, queixas, responde às perguntas, descreve o que sente, conta sua história.
+- Se for genuinamente impossível decidir, use "Indefinido".
 
-function normalizeSpeaker(value?: string): DialogueTurn['speaker'] {
-  const lower = (value || '').toLowerCase()
-  if (lower.includes('med') || lower.includes('doctor') || lower.includes('clinician')) return 'Médico'
-  if (lower.includes('pac') || lower.includes('patient')) return 'Paciente'
-  return 'Indefinido'
-}
+Regras:
+- NÃO invente, resuma ou altere o conteúdo. Apenas separe e rotule o que foi dito.
+- Corrija apenas pontuação e quebras óbvias para deixar legível.
+- Descarte ruído ou trechos sem sentido.
 
-function normalizeTurns(input: unknown): DialogueTurn[] {
-  const container = input as { turns?: unknown[]; segments?: unknown[]; utterances?: unknown[] }
-  const rawTurns = container.turns || container.segments || container.utterances || []
-  if (!Array.isArray(rawTurns)) return []
+Retorne SOMENTE um objeto JSON válido no formato:
+{ "turns": [ { "speaker": "Médico" | "Paciente" | "Indefinido", "text": "..." } ] }`
 
-  return rawTurns
-    .map((turn) => {
-      const item = turn as { speaker?: string; text?: string; transcript?: string }
-      return {
-        speaker: normalizeSpeaker(item.speaker),
-        text: (item.text || item.transcript || '').trim(),
-      }
-    })
-    .filter((turn) => turn.text)
-}
-
-// Diarizacao semantica por LLM: separa a transcricao corrida em turnos Medico/Paciente.
-export async function diarizeTranscript(
-  transcript: string,
-  options: ReviewOptions = {}
-): Promise<DialogueTurn[]> {
+// Diarização semântica por LLM: separa a transcrição corrida em turnos Médico/Paciente.
+export async function diarizeTranscript(transcript: string): Promise<DialogueTurn[]> {
   if (!transcript.trim()) return []
 
   const model = process.env.OPENAI_EXTRACTION_MODEL || 'gpt-4o'
-  const startedAt = Date.now()
 
   const response = await getOpenAI().chat.completions.create({
     model,
     messages: [
       { role: 'system', content: DIARIZATION_PROMPT },
-      { role: 'user', content: `Transcricao da consulta:\n\n${transcript}` },
+      { role: 'user', content: `Transcrição da consulta:\n\n${transcript}` },
     ],
     temperature: 0.1,
     max_tokens: 4000,
-    response_format: jsonSchemaResponseFormat(
-      'consultation_diarization',
-      diarizationSchema,
-      'Turnos de fala de uma consulta medica'
-    ),
+    response_format: { type: 'json_object' },
   })
 
-  await recordAiUsage(
-    {
-      consultationId: options.consultationId,
-      service: 'diarization_text',
-      model,
-      reason: 'revisao_final_textual',
-      startedAt,
-    },
-    response.usage
-  )
-
+  const content = response.choices[0]?.message?.content || '{}'
   try {
-    return normalizeTurns(JSON.parse(response.choices[0]?.message?.content || '{}'))
+    const parsed = JSON.parse(content) as { turns?: DialogueTurn[] }
+    return Array.isArray(parsed.turns) ? parsed.turns : []
   } catch {
     return []
   }
-}
-
-async function diarizeAudioFile(audioPath: string): Promise<DialogueTurn[]> {
-  if (!existsSync(audioPath)) return []
-
-  const model = process.env.OPENAI_FINAL_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe-diarize'
-  const response = await getOpenAI().audio.transcriptions.create({
-    file: createReadStream(audioPath),
-    model,
-    language: 'pt',
-    response_format: 'diarized_json',
-    chunking_strategy: 'auto',
-  } as any)
-
-  if (typeof response === 'string') return []
-  return normalizeTurns(response)
 }
 
 export interface FinalReview {
@@ -113,33 +61,17 @@ export interface FinalReview {
   extracted: ExtractedData
 }
 
-// Revisao final: prefere diarizacao nativa por audio e usa fallback textual.
-export async function runFinalReview(
-  transcript: string,
-  options: ReviewOptions = {}
-): Promise<FinalReview> {
-  let turns: DialogueTurn[] = []
-
-  if (options.audioPath) {
-    try {
-      turns = await diarizeAudioFile(options.audioPath)
-    } catch (err) {
-      console.warn('[review] Diarizacao por audio falhou; usando fallback textual:', err)
-    }
-  }
-
-  if (!turns.length) {
-    turns = await diarizeTranscript(transcript, options)
-  }
+// Revisão final: relê TODA a conversa, separa os falantes e faz a extração apurada
+// usando o diálogo estruturado (saber quem falou melhora muito a precisão).
+export async function runFinalReview(transcript: string): Promise<FinalReview> {
+  const turns = await diarizeTranscript(transcript)
 
   const structuredText = turns.length
     ? turns.map((t) => `${t.speaker}: ${t.text}`).join('\n')
     : transcript
 
-  const extracted = await reinterpretFullTranscript(structuredText, {
-    consultationId: options.consultationId,
-    reason: 'revisao_final',
-  })
+  // Extrai sobre o diálogo estruturado — a IA distingue queixa do paciente de fala do médico
+  const extracted = await reinterpretFullTranscript(structuredText)
 
   return { turns, structuredText, extracted }
 }

@@ -1,6 +1,4 @@
 import OpenAI from 'openai'
-import { jsonSchemaResponseFormat, soapSchema } from './openai-schemas'
-import { recordAiUsage } from './ai-usage.service'
 
 let _openai: OpenAI | null = null
 const getOpenAI = () => {
@@ -15,54 +13,41 @@ export interface SoapNote {
   plan: string
 }
 
-interface SoapOptions {
-  consultationId?: string
+const SYSTEM_PROMPT = `Você é um médico experiente gerando uma evolução clínica formal.
+
+Com base na transcrição completa da consulta fornecida, gere uma evolução clínica no formato SOAP em português médico formal.
+
+Retorne SOMENTE um objeto JSON válido sem markdown, sem texto adicional:
+{
+  "subjective": "Dados subjetivos: queixas, sintomas e história relatados pelo paciente",
+  "objective": "Dados objetivos: sinais vitais, exame físico, achados objetivos",
+  "assessment": "Avaliação: hipótese(s) diagnóstica(s) e raciocínio clínico",
+  "plan": "Plano: condutas, prescrições, orientações, encaminhamentos, retorno"
 }
 
-const SYSTEM_PROMPT = `Voce e um medico experiente gerando evolucao clinica formal no formato SOAP.
+Use linguagem médica formal e concisa. Se alguma seção não tiver informação suficiente, use uma frase indicando isso.`
 
-Use portugues medico formal e conciso.
-Nao invente informacoes.
-Se uma secao nao tiver dados suficientes, registre isso de forma objetiva.`
-
-export async function generateSoap(
-  fullTranscript: string,
-  options: SoapOptions = {}
-): Promise<SoapNote> {
+export async function generateSoap(fullTranscript: string): Promise<SoapNote> {
   const model = process.env.OPENAI_SOAP_MODEL || 'gpt-4o'
-  const startedAt = Date.now()
 
   const response = await getOpenAI().chat.completions.create({
     model,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: `Transcricao estruturada da consulta:\n\n${fullTranscript}` },
+      { role: 'user', content: `Transcrição completa da consulta:\n\n${fullTranscript}` },
     ],
     temperature: 0.2,
-    max_tokens: 2200,
-    response_format: jsonSchemaResponseFormat(
-      'soap_note',
-      soapSchema,
-      'Evolucao clinica no formato SOAP'
-    ),
+    max_tokens: 3000,
   })
 
-  await recordAiUsage(
-    {
-      consultationId: options.consultationId,
-      service: 'soap_generation',
-      model,
-      reason: 'finalizacao_consulta',
-      startedAt,
-    },
-    response.usage
-  )
+  const content = response.choices[0]?.message?.content || '{}'
 
   try {
-    return JSON.parse(response.choices[0]?.message?.content || '{}') as SoapNote
+    const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+    return JSON.parse(cleaned) as SoapNote
   } catch {
     return {
-      subjective: 'Nao foi possivel gerar automaticamente. Por favor, preencha manualmente.',
+      subjective: 'Não foi possível gerar automaticamente. Por favor, preencha manualmente.',
       objective: '',
       assessment: '',
       plan: '',

@@ -100,12 +100,6 @@ model Consultation {
   transcript String?
   // Transcrição estruturada em turnos (Médico/Paciente) gerada na revisão final
   transcriptStructured String?
-  // Segmentos confirmados da transcrição ao vivo (JSON)
-  transcriptSegmentsJson String?
-  // Estado incremental da extração/IA para auditoria e futuras sugestões (JSON)
-  extractionStateJson String?
-  // Métricas agregadas de uso de IA (JSON)
-  aiUsageJson String?
 
   // Anamnese
   chiefComplaint   String?

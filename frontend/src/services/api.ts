@@ -115,16 +115,9 @@ export const api = {
     listByPatient: (patientId: string) =>
       request<Consultation[]>(`/api/consultations/patient/${patientId}`),
 
-    transcribeChunk: async (
-      id: string,
-      audioBlob: Blob,
-      meta?: { seq?: number; startedAtMs?: number; endedAtMs?: number }
-    ): Promise<TranscribeResponse> => {
+    transcribeChunk: async (id: string, audioBlob: Blob): Promise<TranscribeResponse> => {
       const formData = new FormData()
       formData.append('audio', audioBlob, 'chunk.webm')
-      if (meta?.seq) formData.append('seq', String(meta.seq))
-      if (typeof meta?.startedAtMs === 'number') formData.append('startedAtMs', String(meta.startedAtMs))
-      if (typeof meta?.endedAtMs === 'number') formData.append('endedAtMs', String(meta.endedAtMs))
       const res = await fetch(buildUrl(`/api/consultations/${id}/transcribe`), {
         method: 'POST',
         body: formData,
@@ -133,14 +126,6 @@ export const api = {
       if (!res.ok) return parseError(res)
       return res.json()
     },
-
-    transcriptionEventsUrl: (id: string) =>
-      buildUrl(`/api/consultations/${id}/transcription-events`),
-
-    flushTranscription: (id: string) =>
-      request<{ fullTranscript: string | null }>(`/api/consultations/${id}/transcription-flush`, {
-        method: 'POST',
-      }),
 
     reinterpret: async (id: string): Promise<{ extracted: ExtractedData }> => {
       const res = await fetch(buildUrl(`/api/consultations/${id}/reinterpret`), {
