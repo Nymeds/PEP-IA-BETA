@@ -1,5 +1,5 @@
 'use client'
-import { RecordingState } from '@/hooks/useAudioRecorder'
+import { RecordingState } from '@/hooks/useRealtimeTranscription'
 import { Mic, Square, Loader2, Sparkles } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 

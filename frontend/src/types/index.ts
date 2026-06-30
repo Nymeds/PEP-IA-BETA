@@ -187,6 +187,34 @@ export interface TranscribeResponse {
   fullTranscript: string | null
 }
 
+export interface RealtimeClientSecretResponse {
+  value: string
+  expiresAt: number | null
+}
+
+export interface RealtimeTranscriptAppendResponse {
+  appendedText: string
+  fullTranscript: string | null
+}
+
+export interface ConsultationTranscriptSegment {
+  id: string
+  itemId: string
+  sequence: number
+  text: string
+  source: string
+  kind: string
+  createdAt: string
+}
+
+export interface RawTranscriptResponse {
+  rawTranscript: string
+  currentTranscript: string | null
+  hasEditedTranscript: boolean
+  segmentCount: number
+  segments: ConsultationTranscriptSegment[]
+}
+
 export interface DialogueTurn {
   speaker: 'Médico' | 'Paciente' | 'Indefinido'
   text: string

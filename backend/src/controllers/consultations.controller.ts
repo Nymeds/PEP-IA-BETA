@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import { FastifyReply, FastifyRequest } from 'fastify'
 import { createReadStream, existsSync } from 'fs'
 import { getPrisma } from '../lib/prisma'
@@ -6,6 +7,7 @@ import { reinterpretFullTranscript, serializeExtractedToDb } from '../services/e
 import { runFinalReview } from '../services/review.service'
 import { suggestTopics } from '../services/analysis.service'
 import { generateSoap } from '../services/soap.service'
+import { createRealtimeClientSecret } from '../services/realtime.service'
 import {
   CONSULTATION_STATUS,
   normalizeConsultationStatus,
@@ -57,6 +59,122 @@ function buildSnapshot(consultation: Record<string, unknown>): Record<string, un
   const snapshot: Record<string, unknown> = {}
   for (const field of CLINICAL_FIELDS) snapshot[field] = consultation[field] ?? null
   return snapshot
+}
+
+function normalizeTranscriptForCompare(value: string | null | undefined): string {
+  return (value || '').replace(/\s+/g, ' ').trim()
+}
+
+async function buildRawTranscriptPayload(consultationId: string, currentTranscript?: string | null) {
+  const segments = await getPrisma().consultationTranscriptSegment.findMany({
+    where: { consultationId },
+    orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+  })
+
+  if (!segments.length) {
+    return {
+      rawTranscript: currentTranscript || '',
+      currentTranscript: currentTranscript || null,
+      hasEditedTranscript: false,
+      segmentCount: 0,
+      segments: [] as Array<{
+        id: string
+        itemId: string
+        sequence: number
+        text: string
+        source: string
+        kind: string
+        createdAt: string
+      }>,
+    }
+  }
+
+  const rawTranscript = segments
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join('\n')
+
+  return {
+    rawTranscript,
+    currentTranscript: currentTranscript || null,
+    hasEditedTranscript:
+      normalizeTranscriptForCompare(rawTranscript) !== normalizeTranscriptForCompare(currentTranscript),
+    segmentCount: segments.length,
+    segments: segments.map((segment) => ({
+      id: segment.id,
+      itemId: segment.itemId,
+      sequence: segment.sequence,
+      text: segment.text,
+      source: segment.source,
+      kind: segment.kind,
+      createdAt: segment.createdAt.toISOString(),
+    })),
+  }
+}
+
+async function persistTranscriptSegment(input: {
+  consultationId: string
+  itemId: string
+  text: string
+  source: string
+  kind: string
+  payload?: string
+}) {
+  return getPrisma().$transaction(async (tx) => {
+    const consultation = await tx.consultation.findUnique({
+      where: { id: input.consultationId },
+      select: { transcript: true },
+    })
+
+    if (!consultation) throw new Error('Consulta nao encontrada')
+
+    const existingSegment = await tx.consultationTranscriptSegment.findUnique({
+      where: {
+        consultationId_itemId: {
+          consultationId: input.consultationId,
+          itemId: input.itemId,
+        },
+      },
+      select: { id: true },
+    })
+
+    if (existingSegment) {
+      return {
+        appendedText: '',
+        fullTranscript: consultation.transcript || null,
+      }
+    }
+
+    const aggregate = await tx.consultationTranscriptSegment.aggregate({
+      where: { consultationId: input.consultationId },
+      _max: { sequence: true },
+    })
+
+    await tx.consultationTranscriptSegment.create({
+      data: {
+        consultationId: input.consultationId,
+        itemId: input.itemId,
+        sequence: (aggregate._max.sequence || 0) + 1,
+        text: input.text,
+        source: input.source,
+        kind: input.kind,
+        payload: input.payload || null,
+      },
+    })
+
+    const previousTranscript = consultation.transcript || ''
+    const fullTranscript = previousTranscript ? `${previousTranscript} ${input.text}` : input.text
+
+    await tx.consultation.update({
+      where: { id: input.consultationId },
+      data: { transcript: fullTranscript },
+    })
+
+    return {
+      appendedText: input.text,
+      fullTranscript,
+    }
+  })
 }
 
 async function findOwnedConsultation(
@@ -240,15 +358,79 @@ export async function transcribeChunk(
     return reply.send({ chunkTranscript: '', fullTranscript: consultation.transcript || null })
   }
 
-  const previousTranscript = consultation.transcript || ''
-  const fullTranscript = previousTranscript ? `${previousTranscript} ${chunkTranscript}` : chunkTranscript
-
-  await getPrisma().consultation.update({
-    where: { id: consultation.id },
-    data: { transcript: fullTranscript },
+  const persisted = await persistTranscriptSegment({
+    consultationId: consultation.id,
+    itemId: `legacy-${Date.now()}-${randomUUID()}`,
+    text: chunkTranscript,
+    source: 'whisper_chunk',
+    kind: 'transcribed_chunk',
   })
 
-  return reply.send({ chunkTranscript, fullTranscript })
+  return reply.send({
+    chunkTranscript: persisted.appendedText,
+    fullTranscript: persisted.fullTranscript,
+  })
+}
+
+export async function createRealtimeToken(
+  req: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+
+  try {
+    const clientSecret = await createRealtimeClientSecret(req.authUser!.id)
+    return reply.send(clientSecret)
+  } catch (error) {
+    console.error('[realtime] Erro ao criar client_secret:', error)
+    return reply.status(502).send({
+      error: error instanceof Error ? error.message : 'Nao foi possivel iniciar a sessao realtime',
+    })
+  }
+}
+
+export async function appendRealtimeTranscript(
+  req: FastifyRequest<{
+    Params: { id: string }
+    Body: { itemId?: string; text?: string; payload?: Record<string, unknown> }
+  }>,
+  reply: FastifyReply
+) {
+  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+
+  const itemId = req.body?.itemId?.trim()
+  const text = req.body?.text?.trim()
+  if (!itemId || !text) {
+    return reply.send({ appendedText: '', fullTranscript: consultation.transcript || null })
+  }
+
+  const persisted = await persistTranscriptSegment({
+    consultationId: consultation.id,
+    itemId,
+    text,
+    source: 'openai_realtime',
+    kind: 'completed',
+    payload: req.body?.payload ? JSON.stringify(req.body.payload) : undefined,
+  })
+
+  return reply.send(persisted)
+}
+
+export async function getRawTranscript(
+  req: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const consultation = await getPrisma().consultation.findFirst({
+    where: { id: req.params.id, userId: req.authUser!.id },
+    select: { id: true, transcript: true },
+  })
+
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+
+  const payload = await buildRawTranscriptPayload(consultation.id, consultation.transcript)
+  return reply.send(payload)
 }
 
 export async function reinterpretConsultation(
@@ -374,13 +556,15 @@ export async function getConversationTopics(
 ) {
   const consultation = await getPrisma().consultation.findFirst({
     where: { id: req.params.id, userId: req.authUser!.id },
-    select: { transcript: true },
+    select: { id: true, transcript: true },
   })
 
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (!consultation.transcript?.trim()) return reply.send({ topics: [] })
+  const rawPayload = await buildRawTranscriptPayload(consultation.id, consultation.transcript)
+  const sourceTranscript = rawPayload.rawTranscript.trim() || consultation.transcript?.trim() || ''
+  if (!sourceTranscript) return reply.send({ topics: [] })
 
-  const topics = await suggestTopics(consultation.transcript)
+  const topics = await suggestTopics(sourceTranscript)
   return reply.send({ topics })
 }
 

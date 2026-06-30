@@ -13,6 +13,7 @@ interface Props {
   agendaId: string
   open: boolean
   date: string | null
+  initialSlot?: string | null
   onClose: () => void
   onBooked?: (consultation: Consultation) => void
 }
@@ -21,6 +22,7 @@ export function AgendaQuickScheduleModal({
   agendaId,
   open,
   date,
+  initialSlot,
   onClose,
   onBooked,
 }: Props) {
@@ -34,8 +36,8 @@ export function AgendaQuickScheduleModal({
     if (!open) return
     setSearch('')
     setSelectedPatient(null)
-    setSelectedSlot('')
-  }, [date, open])
+    setSelectedSlot(initialSlot || '')
+  }, [date, initialSlot, open])
 
   const patientsQuery = useQuery({
     queryKey: ['patients', 'helper', deferredSearch],
@@ -242,7 +244,7 @@ export function AgendaQuickScheduleModal({
                             <p className="text-sm font-medium text-slate-800">{appointment.patientName}</p>
                             <p className="text-xs text-slate-500">
                               {appointment.scheduleTitle
-                                ? `${appointment.scheduleTitle} · ${appointment.chiefComplaint || 'Consulta agendada'}`
+                                ? `${appointment.scheduleTitle} - ${appointment.chiefComplaint || 'Consulta agendada'}`
                                 : appointment.chiefComplaint || 'Consulta agendada'}
                             </p>
                           </div>

@@ -1,9 +1,10 @@
 'use client'
+
 import { useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { Consultation } from '@/types'
 import { useConsultation } from '@/hooks/useConsultation'
-import { useAudioRecorder } from '@/hooks/useAudioRecorder'
+import { useRealtimeTranscription } from '@/hooks/useRealtimeTranscription'
 import { api } from '@/services/api'
 import { ConsultationHeader } from './ConsultationHeader'
 import { TabSidebar } from './TabSidebar'
@@ -47,19 +48,21 @@ export function ConsultationView({ consultation }: Props) {
   const [isStarting, setIsStarting] = useState(false)
   const [showConversation, setShowConversation] = useState(false)
 
-  // Conta chunks recebidos para disparar a re-interpretação a cada N
-  const chunksSinceReinterpret = useRef(0)
-  const REINTERPRET_EVERY = 3 // a cada 3 chunks (~24s) relê tudo e consolida
+  const segmentsSinceReinterpret = useRef(0)
+  const persistQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const REINTERPRET_EVERY = 3
   const isReinterpretingRef = useRef(false)
 
-  // Relê toda a transcrição acumulada e redistribui nos campos certos
   const runReinterpret = useCallback(async () => {
-    if (isReinterpretingRef.current) return // evita chamadas concorrentes
+    if (isReinterpretingRef.current) return
+
     isReinterpretingRef.current = true
     setIsInterpreting(true)
     try {
       const { extracted } = await api.consultations.reinterpret(consultation.id)
-      if (extracted && Object.keys(extracted).length > 0) mergeExtracted(extracted)
+      if (extracted && Object.keys(extracted).length > 0) {
+        mergeExtracted(extracted)
+      }
     } catch (err) {
       console.error('Erro ao reinterpretar:', err)
     } finally {
@@ -68,50 +71,73 @@ export function ConsultationView({ consultation }: Props) {
     }
   }, [consultation.id, mergeExtracted])
 
-  const handleChunk = useCallback(
-    async (blob: Blob) => {
-      try {
-        const result = await api.consultations.transcribeChunk(consultation.id, blob)
-        // Só adiciona à tela se sobrou texto após o filtro de alucinação
-        if (result.chunkTranscript) {
-          addTranscript(result.chunkTranscript)
-          chunksSinceReinterpret.current += 1
-          if (chunksSinceReinterpret.current >= REINTERPRET_EVERY) {
-            chunksSinceReinterpret.current = 0
+  const handleTranscriptCompleted = useCallback(
+    async (text: string, itemId: string, payload?: Record<string, unknown>) => {
+      const persist = async () => {
+        try {
+          const result = await api.consultations.appendRealtimeTranscript(consultation.id, { itemId, text, payload })
+          if (!result.appendedText) return
+
+          addTranscript(result.appendedText)
+          segmentsSinceReinterpret.current += 1
+
+          if (segmentsSinceReinterpret.current >= REINTERPRET_EVERY) {
+            segmentsSinceReinterpret.current = 0
             void runReinterpret()
           }
+        } catch (err) {
+          console.error('Erro ao persistir transcricao realtime:', err)
         }
-      } catch (err) {
-        console.error('Erro ao transcrever chunk:', err)
       }
+
+      persistQueueRef.current = persistQueueRef.current.then(persist, persist)
+      await persistQueueRef.current
     },
-    [consultation.id, addTranscript, runReinterpret]
+    [addTranscript, consultation.id, runReinterpret]
   )
 
   const handleStop = useCallback(
     async (fullBlob: Blob) => {
       try {
         await api.consultations.saveAudio(consultation.id, fullBlob)
-        // Re-interpretação final garante que tudo foi consolidado
         await runReinterpret()
       } catch (err) {
-        console.error('Erro ao salvar áudio:', err)
+        console.error('Erro ao salvar audio:', err)
       }
     },
     [consultation.id, runReinterpret]
   )
 
-  const { state: recordingState, startRecording, stopRecording } = useAudioRecorder({
-    chunkIntervalMs: 8000,
-    onChunk: handleChunk,
+  const { state: recordingState, liveTranscript, startRecording, stopRecording } = useRealtimeTranscription({
+    consultationId: consultation.id,
+    commitIntervalMs: 8000,
+    onTranscriptCompleted: handleTranscriptCompleted,
     onStop: handleStop,
   })
+
+  const displayTranscript = liveTranscript
+    ? [transcript, liveTranscript].filter(Boolean).join('\n')
+    : transcript
+
+  const handleStartRecording = useCallback(() => {
+    void startRecording().catch((err) => {
+      console.error('Erro ao iniciar sessao realtime:', err)
+      alert(err instanceof Error ? err.message : 'Nao foi possivel iniciar a sessao realtime')
+    })
+  }, [startRecording])
+
+  const handleStopRecording = useCallback(() => {
+    void stopRecording().catch((err) => {
+      console.error('Erro ao encerrar sessao realtime:', err)
+    })
+  }, [stopRecording])
 
   const isWaiting = data.status === 'em_espera' || data.status === 'scheduled'
   const isInProgress = data.status === 'em_consulta' || data.status === 'active'
 
   const handleStart = useCallback(async () => {
     if (isStarting) return
+
     setIsStarting(true)
     try {
       const updated = await api.consultations.start(consultation.id)
@@ -128,25 +154,25 @@ export function ConsultationView({ consultation }: Props) {
     setIsGeneratingSoap(true)
     try {
       const result = await api.consultations.finalize(consultation.id)
-      // Revisão final corrige os campos do PEP com a análise apurada...
       if (result.extracted && Object.keys(result.extracted).length > 0) {
         mergeExtracted(result.extracted)
       }
-      // ...guarda o diálogo estruturado (Médico/Paciente)...
+
       if (result.turns?.length) {
         updateField('transcriptStructured', JSON.stringify(result.turns))
       }
-      // ...e aplica o SOAP
+
       applySoap(result.soap)
     } catch (err) {
-      console.error('Erro na revisão final:', err)
+      console.error('Erro na revisao final:', err)
     } finally {
       setIsGeneratingSoap(false)
     }
   }, [consultation.id, applySoap, mergeExtracted, updateField])
 
   const handleClose = useCallback(async () => {
-    if (!confirm('Encerrar esta consulta? Os dados serão salvos e a consulta marcada como concluída.')) return
+    if (!confirm('Encerrar esta consulta? Os dados serao salvos e a consulta marcada como concluida.')) return
+
     setIsClosing(true)
     try {
       await saveConsultation()
@@ -156,7 +182,7 @@ export function ConsultationView({ consultation }: Props) {
       console.error('Erro ao encerrar consulta:', err)
       setIsClosing(false)
     }
-  }, [consultation.id, saveConsultation, data.patient, router])
+  }, [consultation.id, data.patient, router, saveConsultation])
 
   const tabContent = {
     anamnese: <AnamneseTab data={data} onChange={updateField} />,
@@ -226,10 +252,10 @@ export function ConsultationView({ consultation }: Props) {
       {isInProgress && (
         <RecordingBar
           recordingState={recordingState}
-          transcript={transcript}
+          transcript={displayTranscript}
           isInterpreting={isInterpreting}
-          onStart={startRecording}
-          onStop={stopRecording}
+          onStart={handleStartRecording}
+          onStop={handleStopRecording}
         />
       )}
     </div>

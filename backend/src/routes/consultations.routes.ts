@@ -4,6 +4,9 @@ import {
   getConsultation,
   updateConsultation,
   transcribeChunk,
+  createRealtimeToken,
+  appendRealtimeTranscript,
+  getRawTranscript,
   reinterpretConsultation,
   saveAudio,
   finalizeConsultation,
@@ -22,6 +25,9 @@ export async function consultationsRoutes(fastify: FastifyInstance) {
   fastify.put('/:id', updateConsultation)
   fastify.post('/:id/start', startConsultation)
   fastify.post('/:id/transcribe', transcribeChunk)
+  fastify.post('/:id/realtime-token', createRealtimeToken)
+  fastify.post('/:id/realtime-transcript', appendRealtimeTranscript)
+  fastify.get('/:id/raw-transcript', getRawTranscript)
   fastify.post('/:id/reinterpret', reinterpretConsultation)
   fastify.post('/:id/audio', saveAudio)
   fastify.post('/:id/finalize', finalizeConsultation)

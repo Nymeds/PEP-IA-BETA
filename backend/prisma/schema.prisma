@@ -8,17 +8,17 @@ datasource db {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  passwordHash String
-  name         String
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  name          String
   suggestedName String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  patients         Patient[]
-  consultations    Consultation[]
-  schedules        Schedule[]
+  patients      Patient[]
+  consultations Consultation[]
+  schedules     Schedule[]
 }
 
 model Schedule {
@@ -30,7 +30,7 @@ model Schedule {
   activeWeekDaysJson         String   @default("[1,2,3,4,5]")
   workOnHolidays             Boolean  @default(false)
   appointmentDurationMinutes Int      @default(30)
-  shiftsJson                 String   @default("[{\"id\":\"manha\",\"label\":\"Manhã\",\"enabled\":true,\"start\":\"08:00\",\"end\":\"12:00\",\"slots\":8},{\"id\":\"tarde\",\"label\":\"Tarde\",\"enabled\":true,\"start\":\"13:00\",\"end\":\"17:00\",\"slots\":8},{\"id\":\"noite\",\"label\":\"Noite\",\"enabled\":false,\"start\":\"18:00\",\"end\":\"21:00\",\"slots\":6}]")
+  shiftsJson                 String   @default("[{\"id\":\"manha\",\"label\":\"Manha\",\"enabled\":true,\"start\":\"08:00\",\"end\":\"12:00\",\"slots\":8},{\"id\":\"tarde\",\"label\":\"Tarde\",\"enabled\":true,\"start\":\"13:00\",\"end\":\"17:00\",\"slots\":8},{\"id\":\"noite\",\"label\":\"Noite\",\"enabled\":false,\"start\":\"18:00\",\"end\":\"21:00\",\"slots\":6}]")
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
 
@@ -55,35 +55,35 @@ model LegacyScheduleSettings {
 }
 
 model Patient {
-  id            String   @id @default(cuid())
-  userId        String?
-  name          String
-  quickCreated  Boolean  @default(false)
-  socialName    String?
-  cpf           String?
-  rg            String?
-  birthDate     String?
-  sex           String?
-  maritalStatus String?
-  phone         String?
-  whatsapp      String?
-  email         String?
-  cep           String?
-  address       String?
-  addressNumber String?
-  neighborhood  String?
-  city          String?
-  state         String?
+  id               String   @id @default(cuid())
+  userId           String?
+  name             String
+  quickCreated     Boolean  @default(false)
+  socialName       String?
+  cpf              String?
+  rg               String?
+  birthDate        String?
+  sex              String?
+  maritalStatus    String?
+  phone            String?
+  whatsapp         String?
+  email            String?
+  cep              String?
+  address          String?
+  addressNumber    String?
+  neighborhood     String?
+  city             String?
+  state            String?
   emergencyContact String?
   emergencyPhone   String?
-  bloodType     String?
-  allergies     String?
-  chronicDiseases String?
-  notes         String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  bloodType        String?
+  allergies        String?
+  chronicDiseases  String?
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
-  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
   consultations Consultation[]
 
   @@index([userId, name])
@@ -95,10 +95,9 @@ model Consultation {
   patientId  String
   scheduleId String?
 
-  // Armazenamento de áudio e transcrição
-  audioPath  String?
-  transcript String?
-  // Transcrição estruturada em turnos (Médico/Paciente) gerada na revisão final
+  // Audio and transcript storage
+  audioPath           String?
+  transcript          String?
   transcriptStructured String?
 
   // Anamnese
@@ -118,7 +117,7 @@ model Consultation {
   currentMedications String?
   familyHistory      String?
 
-  // Hábitos
+  // Habitos
   smoking          String?
   alcohol          String?
   physicalActivity String?
@@ -127,10 +126,10 @@ model Consultation {
   drugs            String?
   occupation       String?
 
-  // Revisão de sistemas (JSON)
+  // Revisao de sistemas
   systemsReview String?
 
-  // Exame físico
+  // Exame fisico
   vitalSigns   String?
   weight       Float?
   height       Float?
@@ -138,7 +137,7 @@ model Consultation {
   generalState String?
   physicalExam String?
 
-  // Diagnóstico
+  // Diagnostico
   mainHypothesis     String?
   differentials      String?
   confirmedDiagnosis String?
@@ -164,10 +163,11 @@ model Consultation {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  user     User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
-  patient  Patient                @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  schedule Schedule?              @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
-  versions ConsultationVersion[]
+  user               User?                         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  patient            Patient                       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  schedule           Schedule?                     @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  versions           ConsultationVersion[]
+  transcriptSegments ConsultationTranscriptSegment[]
 
   @@index([userId, scheduledAt])
   @@index([userId, status])
@@ -175,19 +175,32 @@ model Consultation {
   @@index([patientId])
 }
 
-// Histórico de versões do prontuário — cada correção gera uma versão NOVA,
-// sem sobrescrever a anterior (rastreabilidade / anti-adulteração).
+model ConsultationTranscriptSegment {
+  id             String   @id @default(cuid())
+  consultationId String
+  itemId         String
+  sequence       Int
+  text           String
+  source         String
+  kind           String
+  payload        String?
+  createdAt      DateTime @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@unique([consultationId, itemId])
+  @@index([consultationId, sequence])
+  @@index([consultationId, createdAt])
+}
+
+// Version history of the chart. Each correction creates a new version.
 model ConsultationVersion {
   id             String   @id @default(cuid())
   consultationId String
   version        Int
-  // Snapshot completo dos campos clínicos do PEP naquele momento (JSON)
   snapshot       String
-  // Transcrição vigente naquela versão
   transcript     String?
-  // O que motivou a nova versão (ex: "edição do trecho da HDA")
   reason         String?
-  // Trechos editados, para auditoria: { before, after }
   editDiff       String?
   createdAt      DateTime @default(now())
 

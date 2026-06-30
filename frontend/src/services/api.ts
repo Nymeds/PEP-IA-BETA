@@ -17,6 +17,9 @@ import {
   ScheduleDashboardResponse,
   ScheduleSettingsResponse,
   ScheduleSlotsResponse,
+  RealtimeClientSecretResponse,
+  RealtimeTranscriptAppendResponse,
+  RawTranscriptResponse,
   TranscribeResponse,
 } from '@/types'
 
@@ -126,6 +129,23 @@ export const api = {
       if (!res.ok) return parseError(res)
       return res.json()
     },
+
+    createRealtimeToken: (id: string) =>
+      request<RealtimeClientSecretResponse>(`/api/consultations/${id}/realtime-token`, {
+        method: 'POST',
+      }),
+
+    appendRealtimeTranscript: (
+      id: string,
+      data: { itemId: string; text: string; payload?: Record<string, unknown> }
+    ) =>
+      request<RealtimeTranscriptAppendResponse>(`/api/consultations/${id}/realtime-transcript`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    rawTranscript: (id: string) =>
+      request<RawTranscriptResponse>(`/api/consultations/${id}/raw-transcript`),
 
     reinterpret: async (id: string): Promise<{ extracted: ExtractedData }> => {
       const res = await fetch(buildUrl(`/api/consultations/${id}/reinterpret`), {
