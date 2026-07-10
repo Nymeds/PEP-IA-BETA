@@ -178,7 +178,12 @@ function filterAutomaticExtracted(
     const meta = fieldMeta[fieldId]
     if (!meta?.evidence.length || hasClinicalContent(current[fieldId])) continue
 
-    if (REVIEW_REQUIRED_FIELDS.has(fieldId) || meta.requiresReview || meta.confidence !== 'high') {
+    if (
+      REVIEW_REQUIRED_FIELDS.has(fieldId) ||
+      meta.requiresReview ||
+      meta.status === 'manual' ||
+      meta.status === 'dismissed'
+    ) {
       suggestions.push({
         id: `review-${fieldId}-${meta.evidence[0]?.sequence || 0}`,
         category: 'documentation',
@@ -591,7 +596,7 @@ export async function getRawTranscript(
 }
 
 export async function reinterpretConsultation(
-  req: FastifyRequest<{ Params: { id: string } }>,
+  req: FastifyRequest<{ Params: { id: string }; Body: { force?: boolean } }>,
   reply: FastifyReply
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
@@ -617,6 +622,17 @@ export async function reinterpretConsultation(
     create: { consultationId: consultation.id, templateId },
     update: {},
   })
+
+  if (req.body?.force) {
+    aiState = await prisma.consultationAiState.update({
+      where: { id: aiState.id },
+      data: {
+        lastProcessedSequence: 0,
+        processingThroughSequence: null,
+        processingStartedAt: null,
+      },
+    })
+  }
 
   if (
     aiState.processingThroughSequence != null &&
@@ -692,6 +708,11 @@ export async function reinterpretConsultation(
     )
     const specialtyData = mergeSpecialtyData(consultation.specialtyData, output.specialtyData)
     const shadow = process.env.AI_PIPELINE_V2_SHADOW === 'true'
+    const clinicalUpdates = serializeExtractedToDb(automatic.extracted)
+    const consultationData = {
+      ...clinicalUpdates,
+      ...(specialtyData && !shadow ? { specialtyData } : {}),
+    }
 
     await prisma.$transaction([
       prisma.consultationAiState.update({
@@ -704,8 +725,8 @@ export async function reinterpretConsultation(
           suggestionsJson: JSON.stringify(mergedSuggestions),
         },
       }),
-      ...(specialtyData && !shadow
-        ? [prisma.consultation.update({ where: { id: consultation.id }, data: { specialtyData } })]
+      ...(Object.keys(consultationData).length && !shadow
+        ? [prisma.consultation.update({ where: { id: consultation.id }, data: consultationData })]
         : []),
     ])
 

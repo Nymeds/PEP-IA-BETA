@@ -100,8 +100,9 @@ export function ConsultationView({ consultation }: Props) {
 
   const segmentsSinceReinterpret = useRef(0)
   const persistQueueRef = useRef<Promise<void>>(Promise.resolve())
-  const REINTERPRET_EVERY = 3
+  const REINTERPRET_EVERY = 1
   const isReinterpretingRef = useRef(false)
+  const reinterpretPendingRef = useRef(false)
 
   const notify = useCallback((kind: FeedbackMessage['kind'], title: string, description?: string) => {
     setFeedback({ id: Date.now(), kind, title, description })
@@ -123,7 +124,10 @@ export function ConsultationView({ consultation }: Props) {
   )
 
   const runReinterpret = useCallback(async () => {
-    if (isReinterpretingRef.current) return
+    if (isReinterpretingRef.current) {
+      reinterpretPendingRef.current = true
+      return
+    }
 
     isReinterpretingRef.current = true
     setIsInterpreting(true)
@@ -142,6 +146,10 @@ export function ConsultationView({ consultation }: Props) {
     } finally {
       isReinterpretingRef.current = false
       setIsInterpreting(false)
+      if (reinterpretPendingRef.current) {
+        reinterpretPendingRef.current = false
+        void runReinterpret()
+      }
     }
   }, [consultation.id, mergeExtracted, reportError])
 
