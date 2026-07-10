@@ -3,10 +3,22 @@ import { FastifyReply, FastifyRequest } from 'fastify'
 import { createReadStream, existsSync } from 'fs'
 import { getPrisma } from '../lib/prisma'
 import { transcribeAudioBuffer, saveFullAudio } from '../services/speech.service'
-import { reinterpretFullTranscript, serializeExtractedToDb } from '../services/extraction.service'
+import {
+  CLINICAL_FIELD_IDS,
+  ClinicalFieldId,
+  ClinicalSuggestion,
+  ClinicalTemplateId,
+  ExtractedData,
+  FieldProvenance,
+  SpecialtyDataItem,
+  extractClinicalDelta,
+  parseJsonSafely,
+  reinterpretFullTranscript,
+  resolveClinicalTemplate,
+  serializeExtractedToDb,
+} from '../services/extraction.service'
 import { runFinalReview } from '../services/review.service'
 import { suggestTopics } from '../services/analysis.service'
-import { generateSoap } from '../services/soap.service'
 import { createRealtimeClientSecret } from '../services/realtime.service'
 import {
   CONSULTATION_STATUS,
@@ -54,6 +66,149 @@ const CLINICAL_FIELDS = [
   'assessment',
   'plan',
 ] as const
+
+const JSON_CLINICAL_FIELDS = new Set<string>([
+  'symptoms',
+  'previousDiseases',
+  'surgeries',
+  'hospitalizations',
+  'allergiesDetails',
+  'currentMedications',
+  'familyHistory',
+  'systemsReview',
+  'vitalSigns',
+  'physicalExam',
+  'differentials',
+  'cid',
+])
+
+const REVIEW_REQUIRED_FIELDS = new Set<ClinicalFieldId>([
+  'allergiesDetails',
+  'currentMedications',
+  'vitalSigns',
+  'weight',
+  'height',
+  'generalState',
+  'physicalExam',
+  'mainHypothesis',
+  'differentials',
+  'confirmedDiagnosis',
+  'cid',
+  'therapeuticPlan',
+  'orientations',
+  'referrals',
+  'followUpDate',
+])
+
+const AI_PROCESSING_LEASE_MS = 45_000
+
+function hasClinicalContent(value: unknown) {
+  if (value == null) return false
+  if (typeof value === 'number') return true
+  if (typeof value !== 'string') return true
+  const normalized = value.trim()
+  return normalized !== '' && normalized !== '[]' && normalized !== '{}' && normalized !== 'null'
+}
+
+function buildClinicalState(consultation: Record<string, unknown>) {
+  const state: Record<string, unknown> = {}
+  for (const field of CLINICAL_FIELDS) {
+    const value = consultation[field]
+    if (!hasClinicalContent(value)) continue
+    state[field] = JSON_CLINICAL_FIELDS.has(field) && typeof value === 'string'
+      ? parseJsonSafely(value, value)
+      : value
+  }
+
+  if (typeof consultation.specialtyData === 'string') {
+    state.specialtyData = parseJsonSafely(consultation.specialtyData, {})
+  }
+
+  return state
+}
+
+function parseFieldMeta(value: string | null | undefined) {
+  return parseJsonSafely<Record<string, FieldProvenance>>(value, {})
+}
+
+function parseSuggestions(value: string | null | undefined) {
+  return parseJsonSafely<ClinicalSuggestion[]>(value, [])
+}
+
+function mergeFieldMeta(
+  current: Record<string, FieldProvenance>,
+  incoming: Record<string, FieldProvenance>
+) {
+  const next = { ...current }
+  for (const [field, meta] of Object.entries(incoming)) {
+    const previous = next[field]
+    next[field] = previous?.status === 'manual' || previous?.status === 'dismissed'
+      ? previous
+      : meta
+  }
+  return next
+}
+
+function mergeSpecialtyData(currentValue: string | null | undefined, items: SpecialtyDataItem[]) {
+  const current = parseJsonSafely<Record<string, string>>(currentValue, {})
+  const next = { ...current }
+  for (const item of items) {
+    if (!item.value.trim() || hasClinicalContent(next[item.key])) continue
+    next[item.key] = item.value
+  }
+  return Object.keys(next).length ? JSON.stringify(next) : undefined
+}
+
+function valueToSuggestion(value: unknown) {
+  if (typeof value === 'string') return value
+  return JSON.stringify(value)
+}
+
+function filterAutomaticExtracted(
+  current: Record<string, unknown>,
+  extracted: ExtractedData,
+  fieldMeta: Record<string, FieldProvenance>
+) {
+  const automatic: ExtractedData = {}
+  const suggestions: ClinicalSuggestion[] = []
+
+  for (const [field, value] of Object.entries(extracted)) {
+    if (field === 'currentSection' || !CLINICAL_FIELD_IDS.includes(field as ClinicalFieldId)) continue
+    const fieldId = field as ClinicalFieldId
+    const meta = fieldMeta[fieldId]
+    if (!meta?.evidence.length || hasClinicalContent(current[fieldId])) continue
+
+    if (REVIEW_REQUIRED_FIELDS.has(fieldId) || meta.requiresReview || meta.confidence !== 'high') {
+      suggestions.push({
+        id: `review-${fieldId}-${meta.evidence[0]?.sequence || 0}`,
+        category: 'documentation',
+        title: `Revisar ${fieldId}`,
+        message: 'Informacao identificada pela IA. Confirme antes de incluir no prontuario.',
+        field: fieldId,
+        proposedValue: valueToSuggestion(value),
+        evidence: meta.evidence,
+        status: 'open',
+      })
+      continue
+    }
+
+    automatic[fieldId] = value as never
+  }
+
+  return { extracted: automatic, suggestions }
+}
+
+function getTemplateId(value: string | null | undefined, specialty?: string | null): ClinicalTemplateId {
+  if (value && Object.prototype.hasOwnProperty.call({
+    clinica_geral: true,
+    pediatria: true,
+    ginecologia_obstetricia: true,
+    psiquiatria: true,
+    cardiologia: true,
+  }, value)) return value as ClinicalTemplateId
+
+  return resolveClinicalTemplate(specialty)
+}
 
 function buildSnapshot(consultation: Record<string, unknown>): Record<string, unknown> {
   const snapshot: Record<string, unknown> = {}
@@ -183,7 +338,7 @@ async function findOwnedConsultation(
 ) {
   return getPrisma().consultation.findFirst({
     where: { id, userId },
-    include: { patient: true, schedule: true },
+    include: { patient: true, schedule: true, aiState: true },
   })
 }
 
@@ -205,7 +360,7 @@ export async function startConsultation(
     const updated = await getPrisma().$transaction(async (tx) => {
       const consultation = await tx.consultation.findFirst({
         where: { id: req.params.id, userId: req.authUser!.id },
-        include: { patient: true, schedule: true },
+        include: { patient: true, schedule: true, aiState: true },
       })
 
       if (!consultation) return null
@@ -238,7 +393,7 @@ export async function startConsultation(
           status: CONSULTATION_STATUS.IN_PROGRESS,
           startedAt: consultation.startedAt || new Date(),
         },
-        include: { patient: true, schedule: true },
+        include: { patient: true, schedule: true, aiState: true },
       })
     })
 
@@ -274,7 +429,7 @@ export async function closeConsultation(
       startedAt: consultation.startedAt || new Date(),
       finishedAt: consultation.finishedAt || new Date(),
     },
-    include: { patient: true, schedule: true },
+    include: { patient: true, schedule: true, aiState: true },
   })
 
   return reply.send(updated)
@@ -286,7 +441,7 @@ export async function getConsultation(
 ) {
   const consultation = await getPrisma().consultation.findFirst({
     where: { id: req.params.id, userId: req.authUser!.id },
-    include: { patient: true, schedule: true },
+    include: { patient: true, schedule: true, aiState: true },
   })
 
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
@@ -315,6 +470,7 @@ export async function updateConsultation(
     patient: _patient,
     schedule: _schedule,
     versions: _versions,
+    aiState: _aiState,
     ...data
   } = body
   void _id
@@ -330,11 +486,12 @@ export async function updateConsultation(
   void _patient
   void _schedule
   void _versions
+  void _aiState
 
   const consultation = await getPrisma().consultation.update({
     where: { id: existing.id },
     data: data as Record<string, unknown>,
-    include: { patient: true, schedule: true },
+    include: { patient: true, schedule: true, aiState: true },
   })
 
   return reply.send(consultation)
@@ -437,16 +594,213 @@ export async function reinterpretConsultation(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  const consultation = await getPrisma().consultation.findFirst({
-    where: { id: req.params.id, userId: req.authUser!.id },
-    select: { transcript: true },
+  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (!consultation.transcript?.trim()) return reply.send({ extracted: {}, suggestions: [], fieldMeta: {} })
+
+  if (process.env.AI_PIPELINE_V2 === 'false') {
+    const extracted = await reinterpretFullTranscript(consultation.transcript)
+    return reply.send({
+      extracted,
+      suggestions: [],
+      fieldMeta: {},
+      processing: false,
+      templateId: 'clinica_geral',
+      legacy: true,
+    })
+  }
+
+  const prisma = getPrisma()
+  const templateId = getTemplateId(consultation.aiState?.templateId, consultation.schedule?.specialty)
+  let aiState = await prisma.consultationAiState.upsert({
+    where: { consultationId: consultation.id },
+    create: { consultationId: consultation.id, templateId },
+    update: {},
   })
 
-  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (!consultation.transcript?.trim()) return reply.send({ extracted: {} })
+  if (
+    aiState.processingThroughSequence != null &&
+    aiState.processingStartedAt &&
+    Date.now() - aiState.processingStartedAt.getTime() > AI_PROCESSING_LEASE_MS
+  ) {
+    aiState = await prisma.consultationAiState.update({
+      where: { id: aiState.id },
+      data: { processingThroughSequence: null, processingStartedAt: null },
+    })
+  }
 
-  const extracted = await reinterpretFullTranscript(consultation.transcript)
-  return reply.send({ extracted })
+  if (aiState.processingThroughSequence != null) {
+    return reply.send({
+      extracted: {},
+      suggestions: parseSuggestions(aiState.suggestionsJson),
+      fieldMeta: parseFieldMeta(aiState.fieldMetaJson),
+      processedThroughSequence: aiState.lastProcessedSequence,
+      processing: true,
+      templateId: aiState.templateId,
+    })
+  }
+
+  const segments = await prisma.consultationTranscriptSegment.findMany({
+    where: { consultationId: consultation.id },
+    orderBy: { sequence: 'asc' },
+  })
+  const rawTranscript = segments.map((segment) => segment.text.trim()).filter(Boolean).join('\n')
+  const hasEditedTranscript = normalizeTranscriptForCompare(rawTranscript) !== normalizeTranscriptForCompare(consultation.transcript)
+  const lastSequence = segments.at(-1)?.sequence || 0
+  const inputSegments = hasEditedTranscript || !segments.length
+    ? [{ id: 'edited-transcript', sequence: Math.max(1, lastSequence), text: consultation.transcript }]
+    : segments
+      .filter((segment) => segment.sequence > aiState.lastProcessedSequence)
+      .map((segment) => ({ id: segment.id, sequence: segment.sequence, text: segment.text }))
+
+  if (!inputSegments.length) {
+    return reply.send({
+      extracted: {},
+      suggestions: parseSuggestions(aiState.suggestionsJson),
+      fieldMeta: parseFieldMeta(aiState.fieldMetaJson),
+      processedThroughSequence: aiState.lastProcessedSequence,
+      processing: false,
+      templateId: aiState.templateId,
+    })
+  }
+
+  const processingThroughSequence = inputSegments.at(-1)?.sequence || aiState.lastProcessedSequence
+  const claim = await prisma.consultationAiState.updateMany({
+    where: { id: aiState.id, processingThroughSequence: null },
+    data: { processingThroughSequence, processingStartedAt: new Date() },
+  })
+
+  if (!claim.count) {
+    return reply.send({ extracted: {}, suggestions: [], fieldMeta: {}, processing: true, templateId: aiState.templateId })
+  }
+
+  try {
+    const output = await extractClinicalDelta({
+      templateId: aiState.templateId as ClinicalTemplateId,
+      clinicalState: buildClinicalState(consultation as unknown as Record<string, unknown>),
+      segments: inputSegments,
+    })
+    const fieldMeta = mergeFieldMeta(parseFieldMeta(aiState.fieldMetaJson), output.fieldMeta)
+    const automatic = filterAutomaticExtracted(
+      consultation as unknown as Record<string, unknown>,
+      output.extracted,
+      fieldMeta
+    )
+    const suggestions = [...output.suggestions, ...automatic.suggestions]
+    const mergedSuggestions = Array.from(
+      new Map([...parseSuggestions(aiState.suggestionsJson), ...suggestions].map((item) => [item.id, item])).values()
+    )
+    const specialtyData = mergeSpecialtyData(consultation.specialtyData, output.specialtyData)
+    const shadow = process.env.AI_PIPELINE_V2_SHADOW === 'true'
+
+    await prisma.$transaction([
+      prisma.consultationAiState.update({
+        where: { id: aiState.id },
+        data: {
+          lastProcessedSequence: processingThroughSequence,
+          processingThroughSequence: null,
+          processingStartedAt: null,
+          fieldMetaJson: JSON.stringify(fieldMeta),
+          suggestionsJson: JSON.stringify(mergedSuggestions),
+        },
+      }),
+      ...(specialtyData && !shadow
+        ? [prisma.consultation.update({ where: { id: consultation.id }, data: { specialtyData } })]
+        : []),
+    ])
+
+    return reply.send({
+      extracted: shadow ? {} : automatic.extracted,
+      suggestions: mergedSuggestions,
+      fieldMeta,
+      specialtyData: output.specialtyData,
+      processedThroughSequence: processingThroughSequence,
+      processing: false,
+      templateId: aiState.templateId,
+      shadow,
+    })
+  } catch (error) {
+    await prisma.consultationAiState.update({
+      where: { id: aiState.id },
+      data: { processingThroughSequence: null, processingStartedAt: null },
+    })
+    throw error
+  }
+}
+
+export async function updateAiState(
+  req: FastifyRequest<{
+    Params: { id: string }
+    Body: {
+      action?: 'accept' | 'dismiss'
+      suggestionId?: string
+      field?: ClinicalFieldId
+      templateId?: ClinicalTemplateId
+    }
+  }>,
+  reply: FastifyReply
+) {
+  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+
+  const requestedTemplate = req.body?.templateId
+  if (requestedTemplate && !Object.prototype.hasOwnProperty.call({
+    clinica_geral: true,
+    pediatria: true,
+    ginecologia_obstetricia: true,
+    psiquiatria: true,
+    cardiologia: true,
+  }, requestedTemplate)) {
+    return reply.status(400).send({ error: 'Template clinico invalido' })
+  }
+
+  const prisma = getPrisma()
+  const defaultTemplate = getTemplateId(consultation.aiState?.templateId, consultation.schedule?.specialty)
+  const current = await prisma.consultationAiState.upsert({
+    where: { consultationId: consultation.id },
+    create: { consultationId: consultation.id, templateId: defaultTemplate },
+    update: {},
+  })
+  const fieldMeta = parseFieldMeta(current.fieldMetaJson)
+  const suggestions = parseSuggestions(current.suggestionsJson)
+  const action = req.body?.action
+  const suggestionId = req.body?.suggestionId
+  const field = req.body?.field
+
+  if (action && !suggestionId) {
+    return reply.status(400).send({ error: 'Informe a sugestao para registrar a revisao' })
+  }
+
+  const nextSuggestions = suggestions.map((item) =>
+    item.id === suggestionId ? { ...item, status: action === 'accept' ? 'accepted' as const : 'dismissed' as const } : item
+  )
+  const nextFieldMeta = field && fieldMeta[field]
+    ? {
+      ...fieldMeta,
+      [field]: {
+        ...fieldMeta[field],
+        status: action === 'accept' ? 'accepted' : 'dismissed',
+      },
+    }
+    : fieldMeta
+  const templateChanged = Boolean(requestedTemplate && requestedTemplate !== current.templateId)
+  const updated = await prisma.consultationAiState.update({
+    where: { id: current.id },
+    data: {
+      templateId: requestedTemplate || current.templateId,
+      lastProcessedSequence: templateChanged ? 0 : current.lastProcessedSequence,
+      processingThroughSequence: null,
+      processingStartedAt: null,
+      fieldMetaJson: JSON.stringify(nextFieldMeta),
+      suggestionsJson: JSON.stringify(nextSuggestions),
+    },
+  })
+
+  return reply.send({
+    templateId: updated.templateId,
+    fieldMeta: parseFieldMeta(updated.fieldMetaJson),
+    suggestions: parseSuggestions(updated.suggestionsJson),
+  })
 }
 
 export async function saveAudio(
@@ -475,10 +829,7 @@ export async function finalizeConsultation(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  const consultation = await getPrisma().consultation.findFirst({
-    where: { id: req.params.id, userId: req.authUser!.id },
-    select: { id: true, transcript: true, status: true, startedAt: true, finishedAt: true },
-  })
+  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
 
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
   const normalizedStatus = normalizeConsultationStatus(consultation.status)
@@ -490,26 +841,65 @@ export async function finalizeConsultation(
     return reply.status(400).send({ error: 'Nenhuma transcricao disponivel para revisao' })
   }
 
-  const review = await runFinalReview(consultation.transcript)
-  const soap = await generateSoap(review.structuredText)
-  const fieldUpdates = serializeExtractedToDb(review.extracted)
-
-  await getPrisma().consultation.update({
-    where: { id: consultation.id },
-    data: {
-      ...fieldUpdates,
-      transcriptStructured: JSON.stringify(review.turns),
-      ...soap,
-      status: CONSULTATION_STATUS.FINISHED,
-      startedAt: consultation.startedAt || new Date(),
-      finishedAt: consultation.finishedAt || new Date(),
-    },
+  const prisma = getPrisma()
+  const templateId = getTemplateId(consultation.aiState?.templateId, consultation.schedule?.specialty)
+  const aiState = await prisma.consultationAiState.upsert({
+    where: { consultationId: consultation.id },
+    create: { consultationId: consultation.id, templateId },
+    update: {},
   })
+  const review = await runFinalReview({
+    transcript: consultation.transcript,
+    templateId: aiState.templateId as ClinicalTemplateId,
+    clinicalState: buildClinicalState(consultation as unknown as Record<string, unknown>),
+  })
+  const fieldMeta = mergeFieldMeta(parseFieldMeta(aiState.fieldMetaJson), review.fieldMeta)
+  const automatic = filterAutomaticExtracted(
+    consultation as unknown as Record<string, unknown>,
+    review.extracted,
+    fieldMeta
+  )
+  const suggestions = Array.from(
+    new Map(
+      [...parseSuggestions(aiState.suggestionsJson), ...review.suggestions, ...automatic.suggestions]
+        .map((item) => [item.id, item])
+    ).values()
+  )
+  const fieldUpdates = serializeExtractedToDb(automatic.extracted)
+  const specialtyData = mergeSpecialtyData(consultation.specialtyData, review.specialtyData)
+
+  await prisma.$transaction([
+    prisma.consultation.update({
+      where: { id: consultation.id },
+      data: {
+        ...fieldUpdates,
+        ...(specialtyData ? { specialtyData } : {}),
+        transcriptStructured: JSON.stringify(review.turns),
+        ...review.soap,
+        status: CONSULTATION_STATUS.FINISHED,
+        startedAt: consultation.startedAt || new Date(),
+        finishedAt: consultation.finishedAt || new Date(),
+      },
+    }),
+    prisma.consultationAiState.update({
+      where: { id: aiState.id },
+      data: {
+        fieldMetaJson: JSON.stringify(fieldMeta),
+        suggestionsJson: JSON.stringify(suggestions),
+        finalReviewAt: new Date(),
+        processingThroughSequence: null,
+        processingStartedAt: null,
+      },
+    }),
+  ])
 
   return reply.send({
-    soap,
-    extracted: review.extracted,
+    soap: review.soap,
+    extracted: automatic.extracted,
     turns: review.turns,
+    suggestions,
+    fieldMeta,
+    templateId: aiState.templateId,
   })
 }
 
@@ -603,11 +993,27 @@ export async function createVersion(
 
   const extracted = await reinterpretFullTranscript(newTranscript)
   const fieldUpdates = serializeExtractedToDb(extracted)
+  const nonDestructiveUpdates = Object.fromEntries(
+    Object.entries(fieldUpdates).filter(([field]) => !hasClinicalContent((current as unknown as Record<string, unknown>)[field]))
+  )
 
-  const updated = await getPrisma().consultation.update({
+  const prisma = getPrisma()
+  const templateId = resolveClinicalTemplate((await prisma.schedule.findUnique({ where: { id: current.scheduleId || '' }, select: { specialty: true } }))?.specialty)
+  const updated = await prisma.consultation.update({
     where: { id: current.id },
-    data: { ...fieldUpdates, transcript: newTranscript },
-    include: { patient: true, schedule: true },
+    data: { ...nonDestructiveUpdates, transcript: newTranscript },
+    include: { patient: true, schedule: true, aiState: true },
+  })
+
+  await prisma.consultationAiState.upsert({
+    where: { consultationId: current.id },
+    create: { consultationId: current.id, templateId, lastProcessedSequence: 0 },
+    update: {
+      lastProcessedSequence: 0,
+      processingThroughSequence: null,
+      processingStartedAt: null,
+      suggestionsJson: '[]',
+    },
   })
 
   return reply.send({ consultation: updated, extracted, savedVersion: count + 1 })

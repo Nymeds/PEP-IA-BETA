@@ -76,7 +76,7 @@ function getSlotStatus(slot: ScheduleSlot) {
     return {
       label: 'Livre',
       badgeClass: 'bg-cyan-50 text-cyan-700',
-      description: 'Horario disponivel para agendamento',
+      description: 'Horário disponível para agendamento',
     }
   }
 
@@ -100,26 +100,6 @@ function getSlotStatus(slot: ScheduleSlot) {
         description: 'Consulta agendada',
       }
   }
-}
-
-function DailyCount({
-  label,
-  value,
-  accent,
-}: {
-  label: string
-  value: number
-  accent: string
-}) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
-      <div className={cn('mb-3 inline-flex h-9 w-9 items-center justify-center rounded-xl', accent)}>
-        <div className="h-2.5 w-2.5 rounded-full bg-current" />
-      </div>
-      <p className="text-xs uppercase tracking-[0.16em] text-slate-400">{label}</p>
-      <p className="mt-1 text-2xl font-semibold text-slate-900">{value}</p>
-    </div>
-  )
 }
 
 function DaySummaryCard({
@@ -147,18 +127,18 @@ function DaySummaryCard({
       type="button"
       onClick={onClick}
       className={cn(
-        'flex min-h-[152px] flex-col justify-between border-b border-slate-200 p-4 text-left transition-colors md:border-b-0 md:border-r',
-        isSelected ? 'bg-primary-50' : 'bg-white hover:bg-slate-50',
+        'flex min-h-[126px] flex-col justify-between border-b border-slate-200 p-3 text-left transition-colors md:border-b-0 md:border-r',
+        isSelected ? 'bg-primary-50 ring-1 ring-inset ring-primary-200' : 'bg-white hover:bg-slate-50',
         !isSelected && isToday && 'bg-cyan-50/40'
       )}
     >
       <div>
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-xs uppercase tracking-[0.16em] text-slate-400">
+            <p className="text-[10px] uppercase tracking-[0.16em] text-slate-400">
               {formatWeekdayLabel(date)}
             </p>
-            <p className="mt-1 text-lg font-semibold text-slate-900">{formatShortDateLabel(date)}</p>
+            <p className="mt-1 text-base font-semibold text-slate-900">{formatShortDateLabel(date)}</p>
           </div>
           {isToday && (
             <span className="rounded-full bg-cyan-50 px-2.5 py-1 text-xs text-cyan-700">Hoje</span>
@@ -166,27 +146,27 @@ function DaySummaryCard({
         </div>
 
         {loading ? (
-          <p className="mt-5 text-sm text-slate-400">Carregando capacidade...</p>
+          <p className="mt-4 text-sm text-slate-400">Carregando capacidade...</p>
         ) : error ? (
-          <p className="mt-5 text-sm text-red-500">Falha ao carregar o dia.</p>
+          <p className="mt-4 text-sm text-red-500">Falha ao carregar o dia.</p>
         ) : data?.allowed ? (
           <>
-            <p className="mt-5 text-2xl font-semibold text-slate-900">{data.slots.length} vagas</p>
-            <p className="mt-1 text-sm text-slate-500">
+            <p className="mt-4 text-xl font-semibold text-slate-900">{data.slots.length} vagas</p>
+            <p className="mt-1 text-xs text-slate-500">
               {freeCount} livres e {occupiedCount} ocupadas
             </p>
           </>
         ) : (
           <>
-            <p className="mt-5 text-lg font-semibold text-slate-700">Nao atende</p>
-            <p className="mt-1 text-sm text-slate-500">{data?.reason || 'Dia bloqueado na agenda'}</p>
+            <p className="mt-4 text-base font-semibold text-slate-700">Não atende</p>
+            <p className="mt-1 line-clamp-3 text-xs text-slate-500">{data?.reason || 'Dia bloqueado na agenda'}</p>
           </>
         )}
       </div>
 
       <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
         <span>{data?.enabledShiftCount || 0} turno(s)</span>
-        <span>{data?.isHoliday ? 'Feriado' : 'Dia util'}</span>
+        <span>{data?.isHoliday ? 'Feriado' : 'Dia útil'}</span>
       </div>
     </button>
   )
@@ -236,7 +216,7 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
     }) || []
 
   return (
-    <div className="mx-auto flex max-w-7xl flex-col gap-6 p-6">
+    <div className="flex w-full max-w-none flex-col gap-5 px-5 py-4 lg:px-6">
       <AgendaQuickScheduleModal
         agendaId={agendaId}
         open={quickModalOpen}
@@ -248,31 +228,31 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
         }}
       />
 
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
         <Link href="/" className="text-xs text-primary-600 hover:text-primary-700">
           Voltar ao dashboard
         </Link>
 
-        <section className="rounded-xl border border-slate-200 bg-white p-6">
-          <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex items-start gap-4">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary-50 text-primary-600">
-                <Stethoscope className="h-6 w-6" />
+        <section className="rounded-lg border border-slate-200 bg-white px-5 py-4">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary-50 text-primary-600">
+                <Stethoscope className="h-5 w-5" />
               </div>
 
               <div>
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Operacao da agenda</p>
-                <h1 className="mt-1 text-3xl font-bold text-slate-900">
+                <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">Operação da agenda</p>
+                <h1 className="mt-1 text-2xl font-bold text-slate-900">
                   {selectedAgenda?.title || 'Agenda'}
                 </h1>
-                <p className="mt-1 text-sm text-slate-500">
+                <p className="text-sm text-slate-500">
                   {selectedAgenda?.specialty || 'Carregando especialidade'}
                 </p>
               </div>
             </div>
 
             <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
-              <div className="min-w-[260px]">
+              <div className="min-w-[280px]">
                 <label className="form-label">Agenda</label>
                 <select
                   value={agendaId}
@@ -314,11 +294,11 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
         </section>
       </div>
 
-      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+      <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-3.5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">Visao semanal</h2>
-            <p className="mt-1 text-sm text-slate-500">
+            <h2 className="text-base font-semibold text-slate-900">Visão semanal</h2>
+            <p className="mt-0.5 text-sm text-slate-500">
               Semana de {formatWeekRange(weekDates)} com a capacidade consolidada por dia.
             </p>
           </div>
@@ -358,17 +338,28 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
         </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_320px]">
-        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-          <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+      <div className="grid items-start gap-5 2xl:grid-cols-[minmax(0,1fr)_280px]">
+        <section className="flex h-fit self-start flex-col overflow-hidden rounded-lg border border-slate-200 bg-white">
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-3.5 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900 capitalize">
-                Grade do dia
-              </h2>
-              <p className="mt-1 text-sm text-slate-500">{formatDateHeading(selectedDate)}</p>
+              <h2 className="text-base font-semibold text-slate-900">Grade do dia</h2>
+              <p className="mt-0.5 text-sm text-slate-500">{formatDateHeading(selectedDate)}</p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {selectedDayData?.allowed ? (
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">
+                    {selectedSlots.length} horários
+                  </span>
+                  <span className="rounded-full bg-cyan-50 px-2.5 py-1 text-cyan-700">
+                    {freeSlotsCount} livres
+                  </span>
+                  <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700">
+                    {occupiedSlotsCount} ocupados
+                  </span>
+                </div>
+              ) : null}
               <button
                 type="button"
                 onClick={() => setSelectedDate(today)}
@@ -381,34 +372,33 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
           </div>
 
           {!selectedDayQuery || selectedDayQuery.isLoading ? (
-            <div className="px-5 py-12 text-center text-sm text-slate-400">
-              Carregando horarios do dia...
+            <div className="flex-1 px-5 py-12 text-center text-sm text-slate-400">
+              Carregando horários do dia...
             </div>
           ) : selectedDayQuery.isError ? (
-            <div className="px-5 py-12 text-center text-sm text-red-500">
+            <div className="flex-1 px-5 py-12 text-center text-sm text-red-500">
               {selectedDayQuery.error.message}
             </div>
           ) : !selectedDayData?.allowed ? (
-            <div className="px-5 py-10">
-              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-4">
-                <p className="text-sm font-semibold text-amber-800">Dia indisponivel para atendimento</p>
+            <div className="flex-1 px-5 py-10">
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4">
+                <p className="text-sm font-semibold text-amber-800">Dia indisponível para atendimento</p>
                 <p className="mt-1 text-sm text-amber-700">
-                  {selectedDayData?.reason || 'A agenda nao libera horarios nesta data.'}
+                  {selectedDayData?.reason || 'A agenda não libera horários nesta data.'}
                 </p>
               </div>
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
-                <table className="min-w-full table-fixed">
-                  <thead>
-                    <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-[0.16em] text-slate-400">
-                      <th className="px-5 py-4 font-medium">Hora</th>
-                      <th className="px-5 py-4 font-medium">Paciente</th>
-                      <th className="px-5 py-4 font-medium">Agenda</th>
-                      <th className="px-5 py-4 font-medium">Classificacao</th>
-                      <th className="px-5 py-4 font-medium">Status</th>
-                      <th className="px-5 py-4 text-right font-medium">Acao</th>
+              <div className="max-h-[min(68vh,720px)] overflow-auto">
+                <table className="min-w-full table-auto">
+                  <thead className="sticky top-0 z-10 bg-white shadow-[0_1px_0_0_rgba(226,232,240,1)]">
+                    <tr className="border-b border-slate-100 text-left text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                      <th className="w-24 px-4 py-2.5 font-medium">Hora</th>
+                      <th className="px-4 py-2.5 font-medium">Paciente</th>
+                      <th className="px-4 py-2.5 font-medium">Classificação</th>
+                      <th className="w-28 px-4 py-2.5 font-medium">Status</th>
+                      <th className="w-32 px-4 py-2.5 text-right font-medium">Ação</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -417,27 +407,24 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
 
                       return (
                         <tr key={slot.isoDateTime} className="border-b border-slate-100 last:border-b-0">
-                          <td className="px-5 py-4 align-top">
+                          <td className="px-4 py-2.5 align-top">
                             <p className="text-base font-semibold text-slate-900">{slot.label}</p>
                           </td>
-                          <td className="px-5 py-4 align-top">
+                          <td className="px-4 py-2.5 align-top">
                             <p className="text-sm font-medium text-slate-900">
-                              {slot.appointment?.patientName || 'Horario livre'}
+                              {slot.appointment?.patientName || 'Horário livre'}
                             </p>
                             <p className="mt-1 text-xs text-slate-500">{status.description}</p>
                           </td>
-                          <td className="px-5 py-4 align-top text-sm text-slate-600">
-                            {slot.appointment?.scheduleTitle || selectedAgenda?.title || '-'}
+                          <td className="px-4 py-2.5 align-top text-sm text-slate-600">
+                            {slot.appointment?.chiefComplaint || (slot.available ? 'Disponível' : 'Consulta agendada')}
                           </td>
-                          <td className="px-5 py-4 align-top text-sm text-slate-600">
-                            {slot.appointment?.chiefComplaint || (slot.available ? 'Disponivel' : 'Consulta agendada')}
-                          </td>
-                          <td className="px-5 py-4 align-top">
+                          <td className="px-4 py-2.5 align-top">
                             <span className={cn('rounded-full px-3 py-1 text-xs', status.badgeClass)}>
                               {status.label}
                             </span>
                           </td>
-                          <td className="px-5 py-4 align-top text-right">
+                          <td className="px-4 py-2.5 align-top text-right">
                             {slot.available ? (
                               <button
                                 type="button"
@@ -466,56 +453,40 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
                 </table>
               </div>
 
-              <div className="grid gap-4 border-t border-slate-100 px-5 py-4 sm:grid-cols-3 xl:grid-cols-4">
-                <DailyCount
-                  label="Total"
-                  value={selectedSlots.length}
-                  accent="bg-slate-100 text-slate-600"
-                />
-                <DailyCount
-                  label="Livres"
-                  value={freeSlotsCount}
-                  accent="bg-cyan-50 text-cyan-600"
-                />
-                <DailyCount
-                  label="Ocupadas"
-                  value={occupiedSlotsCount}
-                  accent="bg-emerald-50 text-emerald-600"
-                />
-                <DailyCount
-                  label="Turnos"
-                  value={selectedDayData.enabledShiftCount}
-                  accent="bg-amber-50 text-amber-600"
-                />
+              <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 px-4 py-2.5 text-xs text-slate-500">
+                <span>Total: <strong className="text-slate-800">{selectedSlots.length}</strong></span>
+                <span>Livres: <strong className="text-cyan-700">{freeSlotsCount}</strong></span>
+                <span>Ocupados: <strong className="text-emerald-700">{occupiedSlotsCount}</strong></span>
+                <span>Turnos: <strong className="text-amber-700">{selectedDayData.enabledShiftCount}</strong></span>
               </div>
             </>
           )}
         </section>
 
-        <div className="flex flex-col gap-4">
-          <section className="rounded-xl border border-slate-200 bg-white p-5">
+        <div className="flex flex-col gap-3">
+          <section className="rounded-lg border border-slate-200 bg-white p-4">
             <h2 className="text-sm font-semibold text-slate-900">Resumo operacional</h2>
-            <div className="mt-4 space-y-3">
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Status da agenda</p>
+            <div className="mt-3 space-y-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-[0.16em] text-slate-400">Status da agenda</p>
                 <p className="mt-1 text-sm font-semibold text-slate-900">
                   {selectedAgenda?.status === 'ativa' ? 'Ativa' : 'Inativa'}
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Vagas por dia</p>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-[0.16em] text-slate-400">Vagas por dia</p>
                 <p className="mt-1 text-sm font-semibold text-slate-900">
-                  {selectedAgenda?.maxAppointmentsPerDay || 0} horario(s)
+                  {selectedAgenda?.maxAppointmentsPerDay || 0} horário(s)
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">No mes</p>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-[0.16em] text-slate-400">No mês</p>
                 <p className="mt-1 text-sm font-semibold text-slate-900">
                   {calendarQuery.data?.stats.scheduledThisMonthCount || 0} consulta(s)
                 </p>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Finalizadas</p>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <p className="text-[10px] uppercase tracking-[0.16em] text-slate-400">Finalizadas</p>
                 <p className="mt-1 text-sm font-semibold text-slate-900">
                   {calendarQuery.data?.stats.completedConsultationsCount || 0} consulta(s)
                 </p>
@@ -523,15 +494,15 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
             </div>
           </section>
 
-          <section className="rounded-xl border border-slate-200 bg-white p-5">
+          <section className="rounded-lg border border-slate-200 bg-white p-4">
             <div className="flex items-center gap-2">
               <CircleCheck className="h-4 w-4 text-emerald-600" />
               <h2 className="text-sm font-semibold text-slate-900">Turnos configurados</h2>
             </div>
 
-            <div className="mt-4 space-y-3">
+            <div className="mt-3 space-y-2">
               {(selectedAgenda?.shifts || []).map((shift) => (
-                <div key={shift.id} className="rounded-xl border border-slate-200 px-4 py-3">
+                <div key={shift.id} className="rounded-lg border border-slate-200 px-3 py-2.5">
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-semibold text-slate-900">{shift.label}</p>
                     <span
@@ -553,19 +524,19 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
             </div>
           </section>
 
-          <section className="rounded-xl border border-slate-200 bg-white p-5">
+          <section className="rounded-lg border border-slate-200 bg-white p-4">
             <div className="flex items-center gap-2">
               <Clock3 className="h-4 w-4 text-primary-600" />
-              <h2 className="text-sm font-semibold text-slate-900">Proximos agendamentos</h2>
+              <h2 className="text-sm font-semibold text-slate-900">Próximos agendamentos</h2>
             </div>
 
             {upcomingAppointments.length ? (
-              <div className="mt-4 space-y-3">
+              <div className="mt-3 space-y-2">
                 {upcomingAppointments.slice(0, 5).map((appointment) => (
                   <Link
                     key={appointment.id}
                     href={`/consultations/${appointment.id}`}
-                    className="block rounded-xl border border-slate-200 px-4 py-3 transition-colors hover:border-primary-300 hover:bg-primary-50/40"
+                    className="block rounded-lg border border-slate-200 px-3 py-2.5 transition-colors hover:border-primary-300 hover:bg-primary-50/40"
                   >
                     <p className="text-sm font-semibold text-slate-900">{appointment.patientName}</p>
                     <p className="mt-1 text-xs text-slate-500">

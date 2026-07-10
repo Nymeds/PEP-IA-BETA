@@ -2,9 +2,13 @@ import {
   AuthUser,
   CalendarAppointment,
   Consultation,
+  ClinicalTemplateId,
   ConsultationVersion,
   ConversationTopic,
+  DeltaExtractionResult,
   ExtractedData,
+  FieldProvenance,
+  ClinicalSuggestion,
   FinalizeResponse,
   Patient,
   PatientSummary,
@@ -147,7 +151,7 @@ export const api = {
     rawTranscript: (id: string) =>
       request<RawTranscriptResponse>(`/api/consultations/${id}/raw-transcript`),
 
-    reinterpret: async (id: string): Promise<{ extracted: ExtractedData }> => {
+    reinterpret: async (id: string): Promise<DeltaExtractionResult> => {
       const res = await fetch(buildUrl(`/api/consultations/${id}/reinterpret`), {
         method: 'POST',
         credentials: 'include',
@@ -155,6 +159,24 @@ export const api = {
       if (!res.ok) return parseError(res)
       return res.json()
     },
+
+    updateAiState: (
+      id: string,
+      data: {
+        action?: 'accept' | 'dismiss'
+        suggestionId?: string
+        field?: keyof ExtractedData
+        templateId?: ClinicalTemplateId
+      }
+    ) =>
+      request<{
+        templateId: ClinicalTemplateId
+        fieldMeta: Record<string, FieldProvenance>
+        suggestions: ClinicalSuggestion[]
+      }>(`/api/consultations/${id}/ai-state`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
 
     saveAudio: async (id: string, audioBlob: Blob): Promise<{ audioPath: string }> => {
       const formData = new FormData()

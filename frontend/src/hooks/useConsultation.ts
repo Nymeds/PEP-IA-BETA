@@ -111,8 +111,8 @@ export function useConsultation(initialConsultation: Consultation) {
         if (extracted.diet) updates.diet = extracted.diet
         if (extracted.occupation) updates.occupation = extracted.occupation
         if (extracted.vitalSigns) updates.vitalSigns = JSON.stringify(extracted.vitalSigns)
-        if (extracted.weight) updates.weight = extracted.weight
-        if (extracted.height) updates.height = extracted.height
+        if (typeof extracted.weight === 'number') updates.weight = extracted.weight
+        if (typeof extracted.height === 'number') updates.height = extracted.height
         if (extracted.generalState) updates.generalState = extracted.generalState
         if (extracted.physicalExam) updates.physicalExam = JSON.stringify(extracted.physicalExam)
         if (extracted.mainHypothesis) updates.mainHypothesis = extracted.mainHypothesis
@@ -122,10 +122,14 @@ export function useConsultation(initialConsultation: Consultation) {
         if (extracted.therapeuticPlan) updates.therapeuticPlan = extracted.therapeuticPlan
         if (extracted.orientations) updates.orientations = extracted.orientations
         if (extracted.referrals) updates.referrals = extracted.referrals
+        if (extracted.followUpDate) updates.followUpDate = extracted.followUpDate
         if (extracted.systemsReview && Object.keys(extracted.systemsReview).length)
           updates.systemsReview = JSON.stringify(extracted.systemsReview)
 
-        return { ...prev, ...updates }
+        const onlyEmptyFields = Object.fromEntries(
+          Object.entries(updates).filter(([field]) => !hasContent(prev[field as keyof Consultation]))
+        ) as Partial<Consultation>
+        return { ...prev, ...onlyEmptyFields }
       })
 
       const affectedTabs = new Set<TabId>()

@@ -92,6 +92,8 @@ export interface Consultation {
   audioPath?: string
   transcript?: string
   transcriptStructured?: string
+  specialtyData?: string
+  aiState?: ConsultationAiState | null
   // Anamnese
   chiefComplaint?: string
   hda?: string
@@ -178,8 +180,79 @@ export interface ExtractedData {
   therapeuticPlan?: string
   orientations?: string
   referrals?: string
+  followUpDate?: string
   systemsReview?: Record<string, string[]>
   currentSection?: string
+}
+
+export type ClinicalTemplateId =
+  | 'clinica_geral'
+  | 'pediatria'
+  | 'ginecologia_obstetricia'
+  | 'psiquiatria'
+  | 'cardiologia'
+
+export type AiFieldStatus = 'suggested' | 'accepted' | 'manual' | 'dismissed' | 'review'
+
+export interface EvidenceReference {
+  segmentId: string
+  sequence: number
+  quote: string
+}
+
+export interface FieldProvenance {
+  field: keyof ExtractedData
+  status: AiFieldStatus
+  source: 'patient' | 'clinician' | 'both' | 'unknown'
+  speaker: 'Medico' | 'Paciente' | 'Indefinido'
+  confidence: 'high' | 'medium' | 'low'
+  requiresReview: boolean
+  evidence: EvidenceReference[]
+}
+
+export interface ClinicalSuggestion {
+  id: string
+  category: 'clarification' | 'conflict' | 'clinical_attention' | 'documentation'
+  title: string
+  message: string
+  field?: keyof ExtractedData
+  proposedValue?: string
+  evidence: EvidenceReference[]
+  status: 'open' | 'accepted' | 'dismissed'
+}
+
+export interface SpecialtyDataItem {
+  key: string
+  value: string
+  requiresReview: boolean
+  evidence: EvidenceReference[]
+}
+
+export interface ConsultationAiState {
+  id: string
+  consultationId: string
+  templateId: ClinicalTemplateId
+  lastProcessedSequence: number
+  processingThroughSequence?: number | null
+  processingStartedAt?: string | null
+  fieldMetaJson: string
+  suggestionsJson: string
+  promptVersion: string
+  schemaVersion: string
+  finalReviewAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DeltaExtractionResult {
+  extracted: ExtractedData
+  suggestions: ClinicalSuggestion[]
+  fieldMeta: Record<string, FieldProvenance>
+  specialtyData?: SpecialtyDataItem[]
+  processedThroughSequence?: number
+  processing?: boolean
+  templateId?: ClinicalTemplateId
+  shadow?: boolean
 }
 
 export interface TranscribeResponse {
@@ -231,6 +304,9 @@ export interface FinalizeResponse {
   soap: SoapNote
   extracted: ExtractedData
   turns: DialogueTurn[]
+  suggestions?: ClinicalSuggestion[]
+  fieldMeta?: Record<string, FieldProvenance>
+  templateId?: ClinicalTemplateId
 }
 
 export interface ConversationTopic {
@@ -417,3 +493,29 @@ export interface TabInfo {
   shortLabel: string
   status: TabStatus
 }
+
+export type MedicalToolId =
+  | 'patient_summary'
+  | 'clinical_alerts'
+  | 'ai_status'
+  | 'readiness'
+  | 'conversation_topics'
+  | 'conversation_review'
+  | 'soap_actions'
+
+export interface MedicalToolAction {
+  id: MedicalToolId
+  label: string
+  description: string
+  enabled: boolean
+}
+
+export interface ConsultationReadinessItem {
+  id: string
+  label: string
+  tabId: TabId
+  complete: boolean
+  detail: string
+}
+
+export type AiWorkflowStatus = 'idle' | 'recording' | 'processing' | 'interpreting' | 'generating_soap' | 'error'

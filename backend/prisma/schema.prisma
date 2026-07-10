@@ -99,6 +99,7 @@ model Consultation {
   audioPath           String?
   transcript          String?
   transcriptStructured String?
+  specialtyData       String?
 
   // Anamnese
   chiefComplaint   String?
@@ -168,11 +169,34 @@ model Consultation {
   schedule           Schedule?                     @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   versions           ConsultationVersion[]
   transcriptSegments ConsultationTranscriptSegment[]
+  aiState            ConsultationAiState?
 
   @@index([userId, scheduledAt])
   @@index([userId, status])
   @@index([scheduleId, scheduledAt])
   @@index([patientId])
+}
+
+// Estado operacional da IA. Os dados clinicos continuam no model Consultation;
+// aqui ficam somente cursor, proveniencia e sugestoes auditaveis.
+model ConsultationAiState {
+  id                        String   @id @default(cuid())
+  consultationId            String   @unique
+  templateId                String   @default("clinica_geral")
+  lastProcessedSequence     Int      @default(0)
+  processingThroughSequence Int?
+  processingStartedAt       DateTime?
+  fieldMetaJson             String   @default("{}")
+  suggestionsJson           String   @default("[]")
+  promptVersion             String   @default("clinical-delta-v1")
+  schemaVersion             String   @default("clinical-schema-v1")
+  finalReviewAt             DateTime?
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([templateId])
 }
 
 model ConsultationTranscriptSegment {
