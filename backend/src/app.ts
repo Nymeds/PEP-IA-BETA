@@ -59,6 +59,7 @@ export function buildServer() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    exposedHeaders: ['x-request-id'],
   })
 
   server.register(multipart, {
@@ -66,6 +67,7 @@ export function buildServer() {
   })
 
   server.addHook('onRequest', async (request, reply) => {
+    reply.header('x-request-id', request.id)
     if (request.method === 'OPTIONS') return
 
     const pathname = new URL(request.raw.url || '/', 'http://localhost').pathname
@@ -100,6 +102,20 @@ export function buildServer() {
   server.register(patientsRoutes, { prefix: '/api/patients' })
   server.register(consultationsRoutes, { prefix: '/api/consultations' })
   server.register(scheduleRoutes, { prefix: '/api/schedule' })
+
+  server.setErrorHandler((error, request, reply) => {
+    const normalizedError = error instanceof Error ? error : new Error('Erro interno')
+    const candidateStatus = typeof error === 'object' && error && 'statusCode' in error
+      ? Number((error as { statusCode?: unknown }).statusCode)
+      : 500
+    const statusCode = Number.isInteger(candidateStatus) && candidateStatus >= 400 ? candidateStatus : 500
+    request.log.error({ requestId: request.id, name: normalizedError.name, statusCode }, 'Falha na requisicao')
+    return reply.status(statusCode).send({
+      error: statusCode >= 500 ? 'Nao foi possivel concluir a operacao' : normalizedError.message,
+      code: statusCode >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR',
+      requestId: request.id,
+    })
+  })
 
   server.get('/health', async () => ({ status: 'ok', timestamp: new Date().toISOString() }))
 

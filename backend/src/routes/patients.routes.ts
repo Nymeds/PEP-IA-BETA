@@ -6,10 +6,12 @@ import {
   updatePatient,
   deletePatient,
   getPatientSummary,
+  findPatientDuplicates,
 } from '../controllers/patients.controller'
 
 export async function patientsRoutes(fastify: FastifyInstance) {
   fastify.get('/', listPatients)
+  fastify.get('/duplicates', findPatientDuplicates)
   fastify.get('/:id', getPatient)
   fastify.post('/', createPatient)
   fastify.put('/:id', updatePatient)

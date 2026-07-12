@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 import { QueryProvider } from '@/components/providers/QueryProvider'
 import { SessionProvider } from '@/components/providers/SessionProvider'
+import { FeedbackProvider } from '@/components/ui/FeedbackProvider'
 
 export const metadata: Metadata = {
   title: 'PEP IA — Prontuário Eletrônico com IA',
@@ -13,7 +14,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="pt-BR">
       <body>
         <QueryProvider>
-          <SessionProvider>{children}</SessionProvider>
+          <FeedbackProvider>
+            <SessionProvider>{children}</SessionProvider>
+          </FeedbackProvider>
         </QueryProvider>
       </body>
     </html>

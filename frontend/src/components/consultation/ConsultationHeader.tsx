@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { ArrowLeft, CalendarClock, CheckCircle2, FileText, History, Loader2, Save } from 'lucide-react'
+import { ArrowLeft, CalendarClock, CheckCircle2, CloudOff, FileText, History, Loader2, PanelRight, Save } from 'lucide-react'
 import { useSession } from '@/components/providers/SessionProvider'
 import { RecordingState } from '@/hooks/useRealtimeTranscription'
 import { Consultation } from '@/types'
@@ -16,11 +16,15 @@ interface Props {
   isAutoSaving: boolean
   lastSavedAt: Date | null
   recordingState: RecordingState
+  hasPendingChanges: boolean
+  autoSaveError: string | null
+  toolsOpen: boolean
   onSave: () => void
   onStart: () => void
   onFinalize: () => void
   onClose: () => void
   onOpenConversation: () => void
+  onToggleTools: () => void
 }
 
 const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
@@ -41,11 +45,15 @@ export function ConsultationHeader({
   isAutoSaving,
   lastSavedAt,
   recordingState,
+  hasPendingChanges,
+  autoSaveError,
+  toolsOpen,
   onSave,
   onStart,
   onFinalize,
   onClose,
   onOpenConversation,
+  onToggleTools,
 }: Props) {
   const patient = consultation.patient
   const isWaiting = consultation.status === 'em_espera' || consultation.status === 'scheduled'
@@ -88,11 +96,15 @@ export function ConsultationHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-        <span className="hidden items-center gap-1.5 text-xs text-slate-400 xl:flex">
-          {isAutoSaving ? (
+        <span className="hidden items-center gap-1.5 text-xs text-slate-500 md:flex" role="status" aria-live="polite">
+          {autoSaveError ? (
+            <><CloudOff className="h-3.5 w-3.5 text-red-500" /> Não salvo</>
+          ) : isAutoSaving ? (
             <>
               <Loader2 className="h-3 w-3 animate-spin" /> Salvando
             </>
+          ) : hasPendingChanges ? (
+            <>Alterações pendentes</>
           ) : lastSavedAt ? (
             <>
               <CheckCircle2 className="h-3 w-3 text-emerald-500" />
@@ -102,6 +114,10 @@ export function ConsultationHeader({
             <>Autosave ativo</>
           )}
         </span>
+
+        <button type="button" onClick={onToggleTools} className={cn('btn-secondary p-2', toolsOpen && 'border-primary-200 bg-primary-50 text-primary-700')} title="Ferramentas médicas (Ctrl+Shift+F)" aria-label="Alternar ferramentas médicas" aria-pressed={toolsOpen}>
+          <PanelRight className="h-4 w-4" />
+        </button>
 
         <button
           type="button"

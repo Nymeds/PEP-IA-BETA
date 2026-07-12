@@ -1,9 +1,21 @@
 import { FastifyReply, FastifyRequest } from 'fastify'
+import { Prisma } from '@prisma/client'
 import { getPrisma } from '../lib/prisma'
 import { summarizePatient } from '../services/analysis.service'
 
 interface PatientsListQuery {
   search?: string
+  query?: string
+  cursor?: string
+  limit?: string
+  sort?: 'name_asc' | 'name_desc' | 'recent'
+  filter?: 'all' | 'risk' | 'incomplete'
+}
+
+interface DuplicateQuery {
+  cpf?: string
+  name?: string
+  birthDate?: string
 }
 
 interface PatientBody {
@@ -48,42 +60,92 @@ export async function listPatients(
   req: FastifyRequest<{ Querystring: PatientsListQuery }>,
   reply: FastifyReply
 ) {
-  const search = req.query?.search?.trim()
-  const patients = await getPrisma().patient.findMany({
-    where: {
-      userId: req.authUser!.id,
-      ...(search
-        ? {
-            OR: [
-              { name: { contains: search } },
-              { socialName: { contains: search } },
-              { cpf: { contains: search } },
-              { phone: { contains: search } },
-            ],
-          }
-        : {}),
-    },
-    include: {
-      consultations: {
-        orderBy: [{ scheduledAt: 'desc' }, { createdAt: 'desc' }],
-        take: 10,
-        select: {
-          id: true,
-          patientId: true,
-          createdAt: true,
-          scheduledAt: true,
-          status: true,
-          chiefComplaint: true,
-          schedule: {
-            select: { id: true, title: true, specialty: true },
+  const search = (req.query?.query || req.query?.search)?.trim()
+  const limit = Math.min(100, Math.max(10, Number(req.query?.limit) || 25))
+  const offset = Math.max(0, Number(req.query?.cursor) || 0)
+  const sort = req.query?.sort || 'name_asc'
+  const filter = req.query?.filter || 'all'
+  const conditions: Prisma.PatientWhereInput[] = []
+  if (search) {
+    conditions.push({
+      OR: [
+        { name: { contains: search } },
+        { socialName: { contains: search } },
+        { cpf: { contains: search } },
+        { phone: { contains: search } },
+      ],
+    })
+  }
+  if (filter === 'risk') {
+    conditions.push({ OR: [{ allergies: { not: null } }, { chronicDiseases: { not: null } }] })
+  } else if (filter === 'incomplete') {
+    conditions.push({ quickCreated: true })
+  }
+
+  const where: Prisma.PatientWhereInput = {
+    userId: req.authUser!.id,
+    ...(conditions.length ? { AND: conditions } : {}),
+  }
+  const orderBy: Prisma.PatientOrderByWithRelationInput[] = sort === 'recent'
+    ? [{ updatedAt: 'desc' as const }]
+    : [{ quickCreated: 'asc' as const }, { name: sort === 'name_desc' ? 'desc' as const : 'asc' as const }]
+
+  const [patients, total] = await Promise.all([
+    getPrisma().patient.findMany({
+      where,
+      skip: offset,
+      take: limit,
+      include: {
+        consultations: {
+          orderBy: [{ scheduledAt: 'desc' }, { createdAt: 'desc' }],
+          take: 1,
+          select: {
+            id: true,
+            patientId: true,
+            createdAt: true,
+            scheduledAt: true,
+            status: true,
+            chiefComplaint: true,
+            schedule: {
+              select: { id: true, title: true, specialty: true },
+            },
           },
         },
       },
-    },
-    orderBy: [{ quickCreated: 'asc' }, { name: 'asc' }],
-  })
+      orderBy,
+    }),
+    getPrisma().patient.count({ where }),
+  ])
 
-  return reply.send(patients)
+  return reply.send({
+    items: patients,
+    total,
+    nextCursor: offset + patients.length < total ? String(offset + patients.length) : null,
+  })
+}
+
+export async function findPatientDuplicates(
+  req: FastifyRequest<{ Querystring: DuplicateQuery }>,
+  reply: FastifyReply
+) {
+  const cpf = req.query?.cpf?.replace(/\D/g, '') || ''
+  const name = req.query?.name?.trim() || ''
+  const birthDate = req.query?.birthDate?.trim() || ''
+  if (!cpf && name.length < 2) return reply.send({ matches: [] })
+
+  const patients = await getPrisma().patient.findMany({
+    where: {
+      userId: req.authUser!.id,
+      OR: [
+        ...(cpf ? [{ cpf: { contains: cpf } }] : []),
+        ...(name ? [{ name: { contains: name } }, { socialName: { contains: name } }] : []),
+      ],
+      ...(birthDate ? { birthDate } : {}),
+    },
+    take: 5,
+    orderBy: { name: 'asc' },
+  })
+  return reply.send({ matches: patients })
 }
 
 export async function getPatient(
@@ -102,6 +164,20 @@ export async function createPatient(
   const body = req.body || {}
   if (!body.name?.trim()) {
     return reply.status(400).send({ error: 'Nome do paciente e obrigatorio' })
+  }
+
+  const normalizedCpf = body.cpf?.replace(/\D/g, '') || ''
+  if (normalizedCpf) {
+    const duplicate = await getPrisma().patient.findFirst({
+      where: { userId: req.authUser!.id, cpf: { contains: normalizedCpf } },
+      select: { id: true, name: true },
+    })
+    if (duplicate) {
+      return reply.status(409).send({
+        error: `Ja existe um paciente com este CPF: ${duplicate.name}`,
+        code: 'PATIENT_DUPLICATE_CPF',
+      })
+    }
   }
 
   const patient = await getPrisma().patient.create({

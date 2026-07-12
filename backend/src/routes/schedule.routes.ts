@@ -7,6 +7,7 @@ import {
   getSchedule,
   listSchedules,
   quickBookAppointment,
+  updateAppointment,
   updateSchedule,
 } from '../controllers/schedule.controller'
 
@@ -19,4 +20,5 @@ export async function scheduleRoutes(fastify: FastifyInstance) {
   fastify.get('/agendas/:agendaId/calendar', getCalendar)
   fastify.get('/agendas/:agendaId/slots', getAvailableSlots)
   fastify.post('/agendas/:agendaId/quick-book', quickBookAppointment)
+  fastify.patch('/appointments/:consultationId', updateAppointment)
 }

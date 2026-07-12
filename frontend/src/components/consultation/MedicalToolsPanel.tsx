@@ -15,6 +15,7 @@ import {
   Search,
   Sparkles,
   Stethoscope,
+  PenLine,
   X,
 } from 'lucide-react'
 import { api } from '@/services/api'
@@ -190,10 +191,35 @@ function fieldLabel(field?: string) {
     vitalSigns: 'Sinais vitais',
     physicalExam: 'Exame fisico',
     mainHypothesis: 'Hipotese diagnostica',
+    differentials: 'Diagnósticos diferenciais',
+    cid: 'Possíveis códigos CID',
     therapeuticPlan: 'Conduta',
     referrals: 'Encaminhamentos',
   }
   return labels[field || ''] || field || 'Prontuario'
+}
+
+function formatSuggestionValue(value?: string) {
+  if (!value) return ''
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) => {
+          if (typeof item === 'string') return item
+          if (item && typeof item === 'object') {
+            const entry = item as Record<string, unknown>
+            return [entry.code, entry.description].filter(Boolean).join(' - ') || JSON.stringify(item)
+          }
+          return String(item)
+        })
+        .join('; ')
+    }
+    if (typeof parsed === 'string') return parsed
+    return JSON.stringify(parsed)
+  } catch {
+    return value
+  }
 }
 
 function PanelTitle({ label, title, icon: Icon }: { label: string; title: string; icon?: typeof FileText }) {
@@ -219,13 +245,16 @@ export function MedicalToolsPanel({
   suggestions,
   fieldMeta,
   onSelectTab,
+  onReinterpret,
   onTemplateChange,
   onAcceptSuggestion,
+  onEditSuggestion,
   onDismissSuggestion,
   onOpenConversation,
   onGenerateSoap,
   onCopyText,
   onPrintSoap,
+  className,
 }: {
   consultation: Consultation
   tabStatuses: Record<TabId, TabStatus>
@@ -237,13 +266,16 @@ export function MedicalToolsPanel({
   suggestions: ClinicalSuggestion[]
   fieldMeta: Record<string, FieldProvenance>
   onSelectTab: (tab: TabId) => void
+  onReinterpret: () => void
   onTemplateChange: (templateId: ClinicalTemplateId) => void
   onAcceptSuggestion: (suggestion: ClinicalSuggestion) => void
+  onEditSuggestion: (suggestion: ClinicalSuggestion) => void
   onDismissSuggestion: (suggestion: ClinicalSuggestion) => void
   onOpenConversation: () => void
   onGenerateSoap: () => void
   onCopyText: (label: string, text: string) => void
   onPrintSoap: () => void
+  className?: string
 }) {
   const patient = consultation.patient
   const readiness = useMemo(() => buildReadinessItems(consultation), [consultation])
@@ -257,7 +289,9 @@ export function MedicalToolsPanel({
     workflowStatus(recordingState, isInterpreting, isGeneratingSoap, Boolean(lastError))
   )
   const openSuggestions = suggestions.filter((suggestion) => suggestion.status === 'open')
-  const reviewFields = Object.values(fieldMeta).filter((item) => item.requiresReview).length
+  const reviewFields = Object.values(fieldMeta).filter(
+    (item) => item.requiresReview && item.status !== 'accepted' && item.status !== 'dismissed'
+  ).length
 
   const summaryMutation = useMutation({
     mutationFn: () => api.patients.summary(consultation.patientId),
@@ -273,7 +307,7 @@ export function MedicalToolsPanel({
   const summaryText = buildPatientSummaryText(summaryMutation.data?.summary || undefined)
 
   return (
-    <aside className="flex w-full flex-col border-t border-slate-200 bg-white xl:w-80 xl:flex-shrink-0 xl:overflow-y-auto xl:border-l xl:border-t-0">
+    <aside className={cn('flex w-full flex-col bg-white', className)}>
       <section className="border-b border-slate-200 p-4">
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-primary-50 text-primary-600">
@@ -333,6 +367,15 @@ export function MedicalToolsPanel({
         {tabsUnderReview > 0 ? (
           <p className="mt-2 text-xs text-amber-600">{tabsUnderReview} aba(s) pedem revisão.</p>
         ) : null}
+        <button
+          type="button"
+          onClick={onReinterpret}
+          disabled={isInterpreting || isGeneratingSoap || !consultation.transcript}
+          className="btn-secondary mt-3 w-full justify-center text-xs"
+        >
+          {isInterpreting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          Interpretar conversa agora
+        </button>
       </section>
 
       <section className="border-b border-slate-200 p-4">
@@ -342,7 +385,7 @@ export function MedicalToolsPanel({
           icon={AlertTriangle}
         />
         {reviewFields > 0 ? (
-          <p className="mb-2 text-xs text-amber-700">{reviewFields} campo(s) exigem confirmacao antes de entrar no PEP.</p>
+          <p className="mb-2 text-xs text-amber-700">{reviewFields} campo(s) preenchidos pela IA aguardam confirmação.</p>
         ) : null}
         {openSuggestions.length ? (
           <div className="space-y-2">
@@ -350,10 +393,15 @@ export function MedicalToolsPanel({
               <div key={suggestion.id} className="rounded-md border border-amber-100 bg-amber-50/60 p-3">
                 <p className="text-xs font-semibold text-amber-900">{suggestion.title || fieldLabel(suggestion.field)}</p>
                 <p className="mt-1 text-xs leading-relaxed text-amber-800">{suggestion.message}</p>
-                {suggestion.evidence[0]?.quote ? (
-                  <p className="mt-2 border-l-2 border-amber-300 pl-2 text-xs italic leading-relaxed text-slate-600">
-                    &quot;{suggestion.evidence[0].quote}&quot;
+                {suggestion.proposedValue ? (
+                  <p className="mt-2 rounded border border-amber-200 bg-white/80 px-2 py-1.5 text-xs font-medium text-slate-700">
+                    {fieldLabel(suggestion.field)}: {formatSuggestionValue(suggestion.proposedValue)}
                   </p>
+                ) : null}
+                {suggestion.evidence[0]?.quote ? (
+                  <button type="button" onClick={onOpenConversation} className="mt-2 block w-full border-l-2 border-amber-300 pl-2 text-left text-xs italic leading-relaxed text-slate-600 hover:text-slate-900" title="Abrir evidência na conversa">
+                    &quot;{suggestion.evidence[0].quote}&quot;
+                  </button>
                 ) : null}
                 <div className="mt-2 flex gap-2">
                   {suggestion.field && suggestion.proposedValue ? (
@@ -364,6 +412,12 @@ export function MedicalToolsPanel({
                     >
                       <CheckCircle2 className="h-3.5 w-3.5" />
                       Aplicar
+                    </button>
+                  ) : null}
+                  {suggestion.field && suggestion.proposedValue ? (
+                    <button type="button" onClick={() => onEditSuggestion(suggestion)} className="inline-flex items-center gap-1 text-xs font-semibold text-primary-700 hover:text-primary-800">
+                      <PenLine className="h-3.5 w-3.5" />
+                      Editar
                     </button>
                   ) : null}
                   <button

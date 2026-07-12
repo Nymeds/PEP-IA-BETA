@@ -10,6 +10,7 @@ type ClinicalEvalCase = {
   transcript: string
   expectedFields: string[]
   expectedSuggestion?: 'clarification' | 'conflict' | 'clinical_attention' | 'documentation'
+  enableClinicalSuggestions?: boolean
 }
 
 const SCENARIOS = [
@@ -59,6 +60,24 @@ const SCENARIOS = [
     expectedFields: ['chiefComplaint'],
     expectedSuggestion: 'clarification',
   },
+  {
+    id: 'sindrome-respiratoria',
+    transcript: 'Paciente: Comecou hoje de manha com garganta arranhando, depois tive calafrios, nariz entupido, dor de cabeca, fraqueza e falta de energia. Nao fumo e nao bebo. Ultimamente nao tenho comido bem. Medico: Temperatura 38 graus e peso 85 quilos. Paciente: Estou com febre, sem nausea ou vomito. Medico: Ainda nao consigo fechar um diagnostico.',
+    expectedFields: [
+      'chiefComplaint',
+      'hda',
+      'symptomStart',
+      'symptoms',
+      'smoking',
+      'alcohol',
+      'diet',
+      'vitalSigns',
+      'weight',
+      'systemsReview',
+    ],
+    expectedSuggestion: 'clinical_attention',
+    enableClinicalSuggestions: true,
+  },
 ] as const
 
 function buildCases(): ClinicalEvalCase[] {
@@ -72,6 +91,9 @@ function buildCases(): ClinicalEvalCase[] {
         transcript: `${scenario.transcript} Caso sintetico ${variant}.`,
         expectedFields: [...scenario.expectedFields],
         expectedSuggestion: 'expectedSuggestion' in scenario ? scenario.expectedSuggestion : undefined,
+        enableClinicalSuggestions: 'enableClinicalSuggestions' in scenario
+          ? scenario.enableClinicalSuggestions
+          : undefined,
       }
     })
   )
@@ -104,6 +126,7 @@ async function main() {
       templateId: testCase.templateId,
       clinicalState: {},
       segments: [{ id: testCase.id, sequence: 1, text: testCase.transcript }],
+      enableClinicalSuggestions: testCase.enableClinicalSuggestions,
     })
     const presentFields = new Set([...Object.keys(result.extracted), ...Object.keys(result.fieldMeta)])
     expectedFieldTotal += testCase.expectedFields.length

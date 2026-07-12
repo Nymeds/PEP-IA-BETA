@@ -341,7 +341,7 @@ export interface AuthUser {
   suggestedName: string
 }
 
-export type ConsultationStatus = 'em_espera' | 'em_consulta' | 'finalizado'
+export type ConsultationStatus = 'em_espera' | 'em_consulta' | 'finalizado' | 'cancelado' | 'faltou'
 export type ScheduleStatus = 'ativa' | 'inativa'
 
 export interface ScheduleShift {
@@ -445,11 +445,10 @@ export interface ScheduleAgendaSlotsResponse {
   appointments: CalendarAppointment[]
 }
 
-export interface ScheduleSettings
-  extends Pick<
+export type ScheduleSettings = Pick<
     ScheduleAgenda,
     'activeWeekDays' | 'workOnHolidays' | 'appointmentDurationMinutes' | 'shifts'
-  > {}
+  >
 
 export interface ScheduleCalendarResponse {
   month: string
@@ -519,3 +518,41 @@ export interface ConsultationReadinessItem {
 }
 
 export type AiWorkflowStatus = 'idle' | 'recording' | 'processing' | 'interpreting' | 'generating_soap' | 'error'
+
+export type UiDensity = 'compact' | 'comfortable'
+export type PanelVisibility = 'expanded' | 'collapsed' | 'drawer'
+export type FieldReviewState = 'empty' | 'ai_writing' | 'suggested' | 'review' | 'accepted' | 'manual'
+
+export interface AsyncFeedbackState {
+  status: 'idle' | 'loading' | 'success' | 'error'
+  message?: string
+  retryable?: boolean
+  requestId?: string
+}
+
+export interface ConsultationWorkspaceState {
+  density: UiDensity
+  navigation: PanelVisibility
+  medicalTools: PanelVisibility
+  activeTab: TabId
+}
+
+export type AppointmentOperation = 'reschedule' | 'cancel' | 'no_show'
+
+export interface AppointmentEvent {
+  id: string
+  consultationId: string
+  operation: AppointmentOperation | 'book'
+  previousScheduledAt?: string | null
+  scheduledAt?: string | null
+  previousStatus?: string | null
+  status: string
+  reason?: string | null
+  createdAt: string
+}
+
+export interface PatientListResponse {
+  items: Patient[]
+  nextCursor: string | null
+  total: number
+}

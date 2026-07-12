@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, type ElementType } from 'react'
+import { useEffect, useRef, useState, type ElementType } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   FileEdit,
@@ -45,6 +45,21 @@ export function ConversationModal({ consultation, onClose, onVersionCreated }: P
   const [search, setSearch] = useState('')
   const [editText, setEditText] = useState(consultation.transcript || '')
   const [editReason, setEditReason] = useState('')
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    closeButtonRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [onClose])
 
   const rawTranscriptQuery = useQuery({
     queryKey: ['raw-transcript', consultation.id],
@@ -98,19 +113,22 @@ export function ConversationModal({ consultation, onClose, onVersionCreated }: P
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={onClose}>
       <div
         className="flex h-[84vh] w-full max-w-4xl animate-slide-up flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="conversation-dialog-title"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
           <div className="flex items-center gap-2">
             <History className="h-5 w-5 text-primary-600" />
-            <h3 className="text-sm font-semibold text-slate-900">Histórico da conversa</h3>
+            <h3 id="conversation-dialog-title" className="text-sm font-semibold text-slate-900">Histórico da conversa</h3>
           </div>
-          <button type="button" onClick={onClose} className="rounded p-1 text-slate-400 hover:bg-slate-50 hover:text-slate-600">
+          <button ref={closeButtonRef} type="button" onClick={onClose} className="rounded p-1 text-slate-400 hover:bg-slate-50 hover:text-slate-600" aria-label="Fechar histórico da conversa">
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="flex overflow-x-auto border-b border-slate-100 px-2">
+        <div className="flex overflow-x-auto border-b border-slate-100 px-2" role="tablist" aria-label="Conteúdo da conversa">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -122,6 +140,8 @@ export function ConversationModal({ consultation, onClose, onVersionCreated }: P
                   ? 'border-primary-600 text-primary-700'
                   : 'border-transparent text-slate-500 hover:text-slate-700'
               )}
+              role="tab"
+              aria-selected={tab === id}
             >
               <Icon className="h-4 w-4" />
               {label}

@@ -100,7 +100,48 @@ const REVIEW_REQUIRED_FIELDS = new Set<ClinicalFieldId>([
   'followUpDate',
 ])
 
+const SUGGESTION_ONLY_FIELDS = new Set<ClinicalFieldId>([
+  'mainHypothesis',
+  'differentials',
+  'confirmedDiagnosis',
+  'cid',
+  'therapeuticPlan',
+  'orientations',
+  'referrals',
+  'followUpDate',
+])
+
+const CLINICAL_FIELD_LABELS: Partial<Record<ClinicalFieldId, string>> = {
+  allergiesDetails: 'alergias',
+  currentMedications: 'medicações em uso',
+  vitalSigns: 'sinais vitais',
+  weight: 'peso',
+  height: 'altura',
+  generalState: 'estado geral',
+  physicalExam: 'exame físico',
+  mainHypothesis: 'hipótese diagnóstica',
+  differentials: 'diagnósticos diferenciais',
+  confirmedDiagnosis: 'diagnóstico confirmado',
+  cid: 'CID',
+  therapeuticPlan: 'plano terapêutico',
+  orientations: 'orientações',
+  referrals: 'encaminhamento',
+  followUpDate: 'retorno',
+}
+
+function clinicalFieldLabel(field: ClinicalFieldId) {
+  return CLINICAL_FIELD_LABELS[field] || field
+}
+
 const AI_PROCESSING_LEASE_MS = 45_000
+const AI_CLINICAL_REASONING_EVERY_SEGMENTS = Math.max(
+  2,
+  Number(process.env.AI_CLINICAL_REASONING_EVERY_SEGMENTS) || 4
+)
+const AI_CLINICAL_REASONING_CONTEXT_SEGMENTS = Math.max(
+  2,
+  Number(process.env.AI_CLINICAL_REASONING_CONTEXT_SEGMENTS) || 6
+)
 
 function hasClinicalContent(value: unknown) {
   if (value == null) return false
@@ -110,14 +151,31 @@ function hasClinicalContent(value: unknown) {
   return normalized !== '' && normalized !== '[]' && normalized !== '{}' && normalized !== 'null'
 }
 
+function compactClinicalValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    if (value.length <= 600) return value
+    return `${value.slice(0, 300)} ... ${value.slice(-300)}`
+  }
+  if (Array.isArray(value)) return value.slice(-20).map(compactClinicalValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .slice(0, 20)
+        .map(([key, item]) => [key, compactClinicalValue(item)])
+    )
+  }
+  return value
+}
+
 function buildClinicalState(consultation: Record<string, unknown>) {
   const state: Record<string, unknown> = {}
   for (const field of CLINICAL_FIELDS) {
     const value = consultation[field]
     if (!hasClinicalContent(value)) continue
-    state[field] = JSON_CLINICAL_FIELDS.has(field) && typeof value === 'string'
+    const parsedValue = JSON_CLINICAL_FIELDS.has(field) && typeof value === 'string'
       ? parseJsonSafely(value, value)
       : value
+    state[field] = compactClinicalValue(parsedValue)
   }
 
   if (typeof consultation.specialtyData === 'string') {
@@ -164,10 +222,81 @@ function valueToSuggestion(value: unknown) {
   return JSON.stringify(value)
 }
 
+const MERGEABLE_ARRAY_FIELDS = new Set<ClinicalFieldId>([
+  'symptoms',
+  'previousDiseases',
+  'surgeries',
+  'hospitalizations',
+  'allergiesDetails',
+  'currentMedications',
+])
+
+const MERGEABLE_OBJECT_FIELDS = new Set<ClinicalFieldId>([
+  'vitalSigns',
+  'physicalExam',
+])
+
+function mergeUniqueItems(current: unknown[], incoming: unknown[]) {
+  const seen = new Set<string>()
+  return [...current, ...incoming].filter((item) => {
+    const key = JSON.stringify(item).toLocaleLowerCase('pt-BR')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function mergeSafeClinicalValue(field: ClinicalFieldId, currentValue: unknown, incomingValue: unknown) {
+  if (MERGEABLE_ARRAY_FIELDS.has(field) && Array.isArray(incomingValue)) {
+    const currentItems = typeof currentValue === 'string'
+      ? parseJsonSafely<unknown[]>(currentValue, [])
+      : Array.isArray(currentValue) ? currentValue : []
+    return mergeUniqueItems(currentItems, incomingValue)
+  }
+
+  if (field === 'systemsReview' && incomingValue && typeof incomingValue === 'object') {
+    const currentReview = typeof currentValue === 'string'
+      ? parseJsonSafely<Record<string, string[]>>(currentValue, {})
+      : (currentValue || {}) as Record<string, string[]>
+    const incomingReview = incomingValue as Record<string, string[]>
+    return Object.fromEntries(
+      Array.from(new Set([...Object.keys(currentReview), ...Object.keys(incomingReview)])).map((system) => [
+        system,
+        mergeUniqueItems(currentReview[system] || [], incomingReview[system] || []),
+      ])
+    )
+  }
+
+  if (field === 'familyHistory' && incomingValue && typeof incomingValue === 'object') {
+    const currentHistory = typeof currentValue === 'string'
+      ? parseJsonSafely<Record<string, boolean>>(currentValue, {})
+      : (currentValue || {}) as Record<string, boolean>
+    return { ...currentHistory, ...(incomingValue as Record<string, boolean>) }
+  }
+
+  if (MERGEABLE_OBJECT_FIELDS.has(field) && incomingValue && typeof incomingValue === 'object') {
+    const currentObject = typeof currentValue === 'string'
+      ? parseJsonSafely<Record<string, unknown>>(currentValue, {})
+      : (currentValue || {}) as Record<string, unknown>
+    return { ...currentObject, ...(incomingValue as Record<string, unknown>) }
+  }
+
+  if (field === 'hda' && typeof currentValue === 'string' && typeof incomingValue === 'string') {
+    const currentNormalized = normalizeTranscriptForCompare(currentValue).toLocaleLowerCase('pt-BR')
+    const incomingNormalized = normalizeTranscriptForCompare(incomingValue).toLocaleLowerCase('pt-BR')
+    if (currentNormalized.includes(incomingNormalized)) return currentValue
+    if (incomingNormalized.includes(currentNormalized)) return incomingValue
+    return `${currentValue.trim()} ${incomingValue.trim()}`
+  }
+
+  return incomingValue
+}
+
 function filterAutomaticExtracted(
   current: Record<string, unknown>,
   extracted: ExtractedData,
-  fieldMeta: Record<string, FieldProvenance>
+  fieldMeta: Record<string, FieldProvenance>,
+  previousFieldMeta: Record<string, FieldProvenance>
 ) {
   const automatic: ExtractedData = {}
   const suggestions: ClinicalSuggestion[] = []
@@ -176,19 +305,18 @@ function filterAutomaticExtracted(
     if (field === 'currentSection' || !CLINICAL_FIELD_IDS.includes(field as ClinicalFieldId)) continue
     const fieldId = field as ClinicalFieldId
     const meta = fieldMeta[fieldId]
-    if (!meta?.evidence.length || hasClinicalContent(current[fieldId])) continue
+    if (!meta?.evidence.length) continue
+    const currentHasContent = hasClinicalContent(current[fieldId])
 
-    if (
-      REVIEW_REQUIRED_FIELDS.has(fieldId) ||
-      meta.requiresReview ||
-      meta.status === 'manual' ||
-      meta.status === 'dismissed'
-    ) {
+    if (meta.status === 'manual' || meta.status === 'dismissed') continue
+
+    if (SUGGESTION_ONLY_FIELDS.has(fieldId)) {
+      if (currentHasContent) continue
       suggestions.push({
         id: `review-${fieldId}-${meta.evidence[0]?.sequence || 0}`,
         category: 'documentation',
-        title: `Revisar ${fieldId}`,
-        message: 'Informacao identificada pela IA. Confirme antes de incluir no prontuario.',
+        title: `Revisar ${clinicalFieldLabel(fieldId)}`,
+        message: 'Informação identificada pela IA. Confirme antes de incluir no prontuário.',
         field: fieldId,
         proposedValue: valueToSuggestion(value),
         evidence: meta.evidence,
@@ -197,7 +325,40 @@ function filterAutomaticExtracted(
       continue
     }
 
-    automatic[fieldId] = value as never
+    const previousStatus = previousFieldMeta[fieldId]?.status
+    const aiCanRefreshField = previousStatus === 'suggested' || previousStatus === 'review'
+    if (currentHasContent && !aiCanRefreshField) {
+      if (REVIEW_REQUIRED_FIELDS.has(fieldId) || meta.requiresReview) {
+        suggestions.push({
+          id: `review-existing-${fieldId}-${meta.evidence[0]?.sequence || 0}`,
+          category: 'documentation',
+          title: `Conferir ${clinicalFieldLabel(fieldId)}`,
+          message: 'A conversa trouxe um novo valor para um campo já preenchido. Compare antes de substituir.',
+          field: fieldId,
+          proposedValue: valueToSuggestion(value),
+          evidence: meta.evidence,
+          status: 'open',
+        })
+      }
+      continue
+    }
+
+    automatic[fieldId] = currentHasContent
+      ? mergeSafeClinicalValue(fieldId, current[fieldId], value) as never
+      : value as never
+
+    if (REVIEW_REQUIRED_FIELDS.has(fieldId) || meta.requiresReview) {
+      suggestions.push({
+        id: `review-${fieldId}-${meta.evidence[0]?.sequence || 0}`,
+        category: 'documentation',
+        title: `Confirmar ${clinicalFieldLabel(fieldId)}`,
+        message: 'Dado explícito inserido no prontuário pela IA. Confirme a transcrição e o valor.',
+        field: fieldId,
+        proposedValue: valueToSuggestion(automatic[fieldId]),
+        evidence: meta.evidence,
+        status: 'open',
+      })
+    }
   }
 
   return { extracted: automatic, suggestions }
@@ -374,6 +535,12 @@ export async function startConsultation(
       if (normalizedStatus === CONSULTATION_STATUS.FINISHED) {
         throw new Error('Consulta finalizada nao pode ser iniciada novamente')
       }
+      if (
+        normalizedStatus === CONSULTATION_STATUS.CANCELED ||
+        normalizedStatus === CONSULTATION_STATUS.NO_SHOW
+      ) {
+        throw new Error('Agendamento cancelado ou marcado como falta nao pode ser iniciado')
+      }
 
       if (normalizedStatus === CONSULTATION_STATUS.IN_PROGRESS) {
         return consultation
@@ -476,6 +643,7 @@ export async function updateConsultation(
     schedule: _schedule,
     versions: _versions,
     aiState: _aiState,
+    manualFields: _manualFields,
     ...data
   } = body
   void _id
@@ -492,11 +660,50 @@ export async function updateConsultation(
   void _schedule
   void _versions
   void _aiState
+  const manualFields = Array.isArray(_manualFields)
+    ? _manualFields.filter(
+      (field): field is ClinicalFieldId =>
+        typeof field === 'string' && CLINICAL_FIELD_IDS.includes(field as ClinicalFieldId)
+    )
+    : []
 
-  const consultation = await getPrisma().consultation.update({
-    where: { id: existing.id },
-    data: data as Record<string, unknown>,
-    include: { patient: true, schedule: true, aiState: true },
+  const prisma = getPrisma()
+  const consultation = await prisma.$transaction(async (tx) => {
+    if (manualFields.length) {
+      const templateId = getTemplateId(existing.aiState?.templateId, existing.schedule?.specialty)
+      const aiState = await tx.consultationAiState.upsert({
+        where: { consultationId: existing.id },
+        create: { consultationId: existing.id, templateId },
+        update: {},
+      })
+      const fieldMeta = parseFieldMeta(aiState.fieldMetaJson)
+
+      for (const field of manualFields) {
+        const previous = fieldMeta[field]
+        fieldMeta[field] = previous
+          ? { ...previous, status: 'manual' }
+          : {
+            field,
+            status: 'manual',
+            source: 'unknown',
+            speaker: 'Indefinido',
+            confidence: 'high',
+            requiresReview: false,
+            evidence: [],
+          }
+      }
+
+      await tx.consultationAiState.update({
+        where: { id: aiState.id },
+        data: { fieldMetaJson: JSON.stringify(fieldMeta) },
+      })
+    }
+
+    return tx.consultation.update({
+      where: { id: existing.id },
+      data: data as Record<string, unknown>,
+      include: { patient: true, schedule: true, aiState: true },
+    })
   })
 
   return reply.send(consultation)
@@ -681,6 +888,16 @@ export async function reinterpretConsultation(
   }
 
   const processingThroughSequence = inputSegments.at(-1)?.sequence || aiState.lastProcessedSequence
+  const enableClinicalSuggestions = Boolean(
+    req.body?.force || processingThroughSequence % AI_CLINICAL_REASONING_EVERY_SEGMENTS === 0
+  )
+  const evidenceSegments = enableClinicalSuggestions
+    ? segments.slice(-AI_CLINICAL_REASONING_CONTEXT_SEGMENTS).map((segment) => ({
+      id: segment.id,
+      sequence: segment.sequence,
+      text: segment.text,
+    }))
+    : undefined
   const claim = await prisma.consultationAiState.updateMany({
     where: { id: aiState.id, processingThroughSequence: null },
     data: { processingThroughSequence, processingStartedAt: new Date() },
@@ -695,18 +912,26 @@ export async function reinterpretConsultation(
       templateId: aiState.templateId as ClinicalTemplateId,
       clinicalState: buildClinicalState(consultation as unknown as Record<string, unknown>),
       segments: inputSegments,
+      evidenceSegments,
+      enableClinicalSuggestions,
     })
-    const fieldMeta = mergeFieldMeta(parseFieldMeta(aiState.fieldMetaJson), output.fieldMeta)
+    const latestConsultation = await findOwnedConsultation(consultation.id, req.authUser!.id)
+    if (!latestConsultation) throw new Error('Consulta nao encontrada durante a interpretacao')
+
+    const latestAiState = latestConsultation.aiState || aiState
+    const previousFieldMeta = parseFieldMeta(latestAiState.fieldMetaJson)
+    const fieldMeta = mergeFieldMeta(previousFieldMeta, output.fieldMeta)
     const automatic = filterAutomaticExtracted(
-      consultation as unknown as Record<string, unknown>,
+      latestConsultation as unknown as Record<string, unknown>,
       output.extracted,
-      fieldMeta
+      fieldMeta,
+      previousFieldMeta
     )
     const suggestions = [...output.suggestions, ...automatic.suggestions]
     const mergedSuggestions = Array.from(
-      new Map([...parseSuggestions(aiState.suggestionsJson), ...suggestions].map((item) => [item.id, item])).values()
+      new Map([...parseSuggestions(latestAiState.suggestionsJson), ...suggestions].map((item) => [item.id, item])).values()
     )
-    const specialtyData = mergeSpecialtyData(consultation.specialtyData, output.specialtyData)
+    const specialtyData = mergeSpecialtyData(latestConsultation.specialtyData, output.specialtyData)
     const shadow = process.env.AI_PIPELINE_V2_SHADOW === 'true'
     const clinicalUpdates = serializeExtractedToDb(automatic.extracted)
     const consultationData = {
@@ -874,11 +1099,13 @@ export async function finalizeConsultation(
     templateId: aiState.templateId as ClinicalTemplateId,
     clinicalState: buildClinicalState(consultation as unknown as Record<string, unknown>),
   })
-  const fieldMeta = mergeFieldMeta(parseFieldMeta(aiState.fieldMetaJson), review.fieldMeta)
+  const previousFieldMeta = parseFieldMeta(aiState.fieldMetaJson)
+  const fieldMeta = mergeFieldMeta(previousFieldMeta, review.fieldMeta)
   const automatic = filterAutomaticExtracted(
     consultation as unknown as Record<string, unknown>,
     review.extracted,
-    fieldMeta
+    fieldMeta,
+    previousFieldMeta
   )
   const suggestions = Array.from(
     new Map(

@@ -11,6 +11,7 @@ import {
   ClinicalSuggestion,
   FinalizeResponse,
   Patient,
+  PatientListResponse,
   PatientSummary,
   ScheduleAgenda,
   ScheduleAgendaCalendarResponse,
@@ -31,19 +32,25 @@ export const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
 
 export class ApiError extends Error {
   status: number
+  code?: string
+  requestId?: string
+  retryable: boolean
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, options?: { code?: string; requestId?: string }) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = options?.code
+    this.requestId = options?.requestId
+    this.retryable = status === 408 || status === 429 || status >= 500
   }
 }
 
-function buildUrl(path: string, query?: Record<string, string | undefined>) {
+function buildUrl(path: string, query?: Record<string, string | number | undefined>) {
   const url = new URL(`${BASE}${path}`)
   if (query) {
     Object.entries(query).forEach(([key, value]) => {
-      if (value) url.searchParams.set(key, value)
+      if (value !== undefined && value !== '') url.searchParams.set(key, String(value))
     })
   }
   return url.toString()
@@ -51,22 +58,49 @@ function buildUrl(path: string, query?: Record<string, string | undefined>) {
 
 async function parseError(res: Response): Promise<never> {
   const err = await res.json().catch(() => ({ error: res.statusText }))
-  throw new ApiError(err.message || err.error || 'Erro na requisicao', res.status)
+  throw new ApiError(err.message || err.error || 'Não foi possível concluir a solicitação', res.status, {
+    code: err.code,
+    requestId: res.headers.get('x-request-id') || err.requestId,
+  })
+}
+
+interface RequestOptions extends RequestInit {
+  timeoutMs?: number
 }
 
 async function request<T>(
   path: string,
-  options?: RequestInit,
-  query?: Record<string, string | undefined>
+  options?: RequestOptions,
+  query?: Record<string, string | number | undefined>
 ): Promise<T> {
   const headers: Record<string, string> = { ...(options?.headers as Record<string, string>) }
   if (options?.body) headers['Content-Type'] = 'application/json'
 
-  const res = await fetch(buildUrl(path, query), {
-    ...options,
-    headers,
-    credentials: 'include',
-  })
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), options?.timeoutMs || 30_000)
+  const externalSignal = options?.signal
+  const abortFromExternal = () => controller.abort()
+  externalSignal?.addEventListener('abort', abortFromExternal, { once: true })
+
+  let res: Response
+  try {
+    const { timeoutMs: _timeoutMs, ...fetchOptions } = options || {}
+    void _timeoutMs
+    res = await fetch(buildUrl(path, query), {
+      ...fetchOptions,
+      headers,
+      signal: controller.signal,
+      credentials: 'include',
+    })
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new ApiError('A solicitação demorou mais que o esperado. Tente novamente.', 408)
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+    externalSignal?.removeEventListener('abort', abortFromExternal)
+  }
 
   if (!res.ok) return parseError(res)
   if (res.status === 204) return undefined as T
@@ -90,7 +124,18 @@ export const api = {
   },
 
   patients: {
-    list: (search?: string) => request<Patient[]>('/api/patients', undefined, { search }),
+    page: (params?: {
+      query?: string
+      cursor?: string
+      limit?: number
+      sort?: 'name_asc' | 'name_desc' | 'recent'
+      filter?: 'all' | 'risk' | 'incomplete'
+    }) => request<PatientListResponse>('/api/patients', undefined, params),
+    list: (search?: string) =>
+      request<PatientListResponse>('/api/patients', undefined, { query: search, limit: 100 })
+        .then((response) => response.items),
+    duplicates: (data: { cpf?: string; name?: string; birthDate?: string }) =>
+      request<{ matches: Patient[] }>('/api/patients/duplicates', undefined, data),
     get: (id: string) => request<Patient>(`/api/patients/${id}`),
     create: (data: Partial<Patient>) =>
       request<Patient>('/api/patients', { method: 'POST', body: JSON.stringify(data) }),
@@ -99,7 +144,8 @@ export const api = {
     delete: (id: string) => request<void>(`/api/patients/${id}`, { method: 'DELETE' }),
     summary: (id: string) =>
       request<{ summary: PatientSummary | null; consultationCount?: number; message?: string }>(
-        `/api/patients/${id}/summary`
+        `/api/patients/${id}/summary`,
+        { timeoutMs: 60_000 }
       ),
   },
 
@@ -112,7 +158,10 @@ export const api = {
     start: (id: string) =>
       request<Consultation>(`/api/consultations/${id}/start`, { method: 'POST' }),
     get: (id: string) => request<Consultation>(`/api/consultations/${id}`),
-    update: (id: string, data: Partial<Consultation>) =>
+    update: (
+      id: string,
+      data: Partial<Consultation> & { manualFields?: (keyof Consultation)[] }
+    ) =>
       request<Consultation>(`/api/consultations/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
@@ -151,9 +200,11 @@ export const api = {
     rawTranscript: (id: string) =>
       request<RawTranscriptResponse>(`/api/consultations/${id}/raw-transcript`),
 
-    reinterpret: async (id: string): Promise<DeltaExtractionResult> => {
+    reinterpret: async (id: string, options?: { force?: boolean }): Promise<DeltaExtractionResult> => {
       const res = await fetch(buildUrl(`/api/consultations/${id}/reinterpret`), {
         method: 'POST',
+        headers: options ? { 'Content-Type': 'application/json' } : undefined,
+        body: options ? JSON.stringify(options) : undefined,
         credentials: 'include',
       })
       if (!res.ok) return parseError(res)
@@ -191,7 +242,7 @@ export const api = {
     },
 
     finalize: (id: string) =>
-      request<FinalizeResponse>(`/api/consultations/${id}/finalize`, { method: 'POST' }),
+      request<FinalizeResponse>(`/api/consultations/${id}/finalize`, { method: 'POST', timeoutMs: 120_000 }),
 
     audioUrl: (id: string) => `${BASE}/api/consultations/${id}/audio-file`,
 
@@ -273,6 +324,17 @@ export const api = {
         body: JSON.stringify(agendaIdOrData),
       })
     },
+    updateAppointment: (
+      consultationId: string,
+      data: {
+        operation: 'reschedule' | 'cancel' | 'no_show'
+        scheduledAt?: string
+        reason: string
+      }
+    ) => request<Consultation>(`/api/schedule/appointments/${consultationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
     calendar: async (month?: string): Promise<ScheduleCalendarResponse> => {
       const { agendas } = await api.schedule.agendas()
       const primaryAgenda = agendas[0]

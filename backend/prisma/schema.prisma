@@ -170,11 +170,28 @@ model Consultation {
   versions           ConsultationVersion[]
   transcriptSegments ConsultationTranscriptSegment[]
   aiState            ConsultationAiState?
+  appointmentEvents  ConsultationAppointmentEvent[]
 
   @@index([userId, scheduledAt])
   @@index([userId, status])
   @@index([scheduleId, scheduledAt])
   @@index([patientId])
+}
+
+model ConsultationAppointmentEvent {
+  id                  String   @id @default(cuid())
+  consultationId      String
+  operation           String
+  previousScheduledAt DateTime?
+  scheduledAt         DateTime?
+  previousStatus      String?
+  status              String
+  reason              String?
+  createdAt           DateTime @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId, createdAt])
 }
 
 // Estado operacional da IA. Os dados clinicos continuam no model Consultation;

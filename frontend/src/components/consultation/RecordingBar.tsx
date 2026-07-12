@@ -1,107 +1,103 @@
 'use client'
 
-import { RecordingState } from '@/hooks/useRealtimeTranscription'
-import { Loader2, Mic, Sparkles, Square } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { CloudOff, Loader2, Mic, Radio, Sparkles, Square } from 'lucide-react'
+import { RecordingState, TranscriptionMode } from '@/hooks/useRealtimeTranscription'
+import { cn } from '../shared/utils'
 
 interface Props {
   recordingState: RecordingState
+  transcriptionMode: TranscriptionMode
+  connectionError?: string | null
   transcript: string
   isInterpreting?: boolean
   onStart: () => void
   onStop: () => void
 }
 
-export function RecordingBar({ recordingState, transcript, isInterpreting, onStart, onStop }: Props) {
-  const transcriptRef = useRef<HTMLDivElement>(null)
+function formatDuration(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0')
+  const seconds = (totalSeconds % 60).toString().padStart(2, '0')
+  return `${minutes}:${seconds}`
+}
 
-  useEffect(() => {
-    if (transcriptRef.current) {
-      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight
-    }
-  }, [transcript])
-
+export function RecordingBar({
+  recordingState,
+  transcriptionMode,
+  connectionError,
+  transcript,
+  isInterpreting,
+  onStart,
+  onStop,
+}: Props) {
+  const [elapsed, setElapsed] = useState(0)
+  const startedAtRef = useRef<number | null>(null)
   const isRecording = recordingState === 'recording'
   const isProcessing = recordingState === 'processing'
 
+  useEffect(() => {
+    if (!isRecording) {
+      if (recordingState === 'idle') {
+        startedAtRef.current = null
+        setElapsed(0)
+      }
+      return
+    }
+    if (!startedAtRef.current) startedAtRef.current = Date.now()
+    const timer = window.setInterval(() => {
+      setElapsed(Math.floor((Date.now() - (startedAtRef.current || Date.now())) / 1000))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [isRecording, recordingState])
+
+  const recentTranscript = useMemo(() => {
+    const normalized = transcript.trim()
+    if (normalized.length <= 700) return normalized
+    return `…${normalized.slice(-700)}`
+  }, [transcript])
+
   return (
-    <div className="flex-shrink-0 border-t border-slate-200 bg-white shadow-[0_-12px_30px_rgba(15,23,42,0.08)]">
-      {(isRecording || isProcessing) && transcript ? (
-        <div
-          ref={transcriptRef}
-          className="max-h-32 overflow-y-auto border-b border-slate-100 bg-slate-50 px-4 py-3 scrollbar-hide lg:px-6"
-        >
-          <p className="mb-1 text-xs font-medium text-slate-500">Transcrição em tempo real</p>
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-700">
-            {transcript}
-            {isRecording ? (
-              <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-primary-500 align-middle" />
-            ) : null}
-          </p>
+    <div className="shrink-0 border-t border-slate-200 bg-white shadow-[0_-8px_24px_rgba(15,23,42,0.08)]" role="region" aria-label="Gravação da consulta">
+      {(isRecording || isProcessing) && recentTranscript ? (
+        <div className="max-h-20 overflow-y-auto border-b border-slate-100 bg-slate-50 px-4 py-2 lg:px-5">
+          <p className="whitespace-pre-wrap text-xs leading-relaxed text-slate-600">{recentTranscript}</p>
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-center gap-3 px-4 py-4 lg:gap-4 lg:px-6">
-        {isRecording ? (
-          <div className="flex items-center gap-2 text-sm font-medium text-red-500">
-            <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-            Gravando
+      <div className="flex min-h-16 flex-wrap items-center gap-3 px-3 py-2.5 sm:flex-nowrap lg:px-5">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className={cn('h-2 w-2 shrink-0 rounded-full', isRecording ? 'animate-pulse bg-red-500' : isProcessing ? 'bg-amber-500' : 'bg-slate-300')} />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
+              <span className="font-semibold text-slate-900">{isRecording ? `Gravando ${formatDuration(elapsed)}` : isProcessing ? 'Processando áudio' : 'Gravação pronta'}</span>
+              {isRecording ? (
+                <span className={cn('inline-flex items-center gap-1 font-medium', transcriptionMode === 'local' ? 'text-amber-700' : 'text-emerald-700')}>
+                  {transcriptionMode === 'local' ? <CloudOff className="h-3.5 w-3.5" /> : <Radio className="h-3.5 w-3.5" />}
+                  {transcriptionMode === 'local' ? 'Modo local seguro' : 'Realtime conectado'}
+                </span>
+              ) : null}
+              {isInterpreting ? <span className="inline-flex items-center gap-1 text-primary-700"><Sparkles className="h-3.5 w-3.5" /> Preenchendo PEP</span> : null}
+            </div>
+            <p className="mt-0.5 truncate text-[11px] text-slate-500">
+              {connectionError || (isRecording ? 'Áudio preservado durante toda a sessão.' : 'Nenhuma gravação ativa.')}
+            </p>
           </div>
-        ) : null}
-
-        {isProcessing ? (
-          <div className="flex items-center gap-2 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Processando áudio
-          </div>
-        ) : null}
-
-        {isInterpreting && isRecording ? (
-          <div className="flex items-center gap-2 text-sm font-medium text-primary-600">
-            <Sparkles className="h-4 w-4 animate-pulse" />
-            Interpretando e preenchendo
-          </div>
-        ) : null}
+        </div>
 
         <button
           type="button"
           onClick={isRecording ? onStop : isProcessing ? undefined : onStart}
           disabled={isProcessing}
-          className={`
-            relative flex h-14 w-14 items-center justify-center rounded-full
-            shadow-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2
-            ${
-              isRecording
-                ? 'bg-red-500 text-white hover:bg-red-600 animate-pulse-recording'
-                : isProcessing
-                  ? 'cursor-not-allowed bg-slate-100 text-slate-400'
-                  : 'bg-primary-600 text-white hover:scale-105 hover:bg-primary-700 hover:shadow-xl'
-            }
-          `}
+          className={cn(
+            'flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white shadow-md transition-colors',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2',
+            isRecording ? 'bg-red-600 hover:bg-red-700' : isProcessing ? 'cursor-not-allowed bg-slate-300' : 'bg-primary-600 hover:bg-primary-700'
+          )}
+          aria-label={isRecording ? 'Parar gravação' : isProcessing ? 'Processando áudio' : 'Iniciar gravação'}
           title={isRecording ? 'Parar gravação' : 'Iniciar gravação'}
         >
-          {isProcessing ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : isRecording ? (
-            <Square className="h-5 w-5" fill="white" />
-          ) : (
-            <Mic className="h-6 w-6" />
-          )}
+          {isProcessing ? <Loader2 className="h-5 w-5 animate-spin" /> : isRecording ? <Square className="h-4 w-4" fill="currentColor" /> : <Mic className="h-5 w-5" />}
         </button>
-
-        {!isRecording && !isProcessing ? (
-          <p className="text-xs text-slate-400">Clique para iniciar a sessão</p>
-        ) : null}
-
-        {isRecording ? (
-          <button
-            type="button"
-            onClick={onStop}
-            className="text-xs text-slate-400 underline transition-colors hover:text-slate-600"
-          >
-            Encerrar sessão
-          </button>
-        ) : null}
       </div>
     </div>
   )

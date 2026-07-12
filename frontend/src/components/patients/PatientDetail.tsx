@@ -5,6 +5,8 @@ import { ArrowLeft, Stethoscope, Pencil, Trash2, CalendarClock, Sparkles, Loader
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { format, calcAge } from '../shared/utils'
+import { useFeedback } from '@/components/ui/FeedbackProvider'
+import { LoadingState } from '@/components/ui/AsyncState'
 
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   scheduled: { label: 'Em espera', cls: 'bg-blue-50 text-blue-600' },
@@ -13,11 +15,14 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   em_consulta: { label: 'Em consulta', cls: 'bg-amber-50 text-amber-600' },
   finalizado: { label: 'Finalizada', cls: 'bg-green-50 text-green-600' },
   completed: { label: 'Concluída', cls: 'bg-green-50 text-green-600' },
+  cancelado: { label: 'Cancelada', cls: 'bg-slate-100 text-slate-600' },
+  faltou: { label: 'Faltou', cls: 'bg-red-50 text-red-700' },
 }
 
 export function PatientDetail({ patientId }: { patientId: string }) {
   const router = useRouter()
   const qc = useQueryClient()
+  const { confirm, notify } = useFeedback()
 
   const { data: patient, isLoading } = useQuery({
     queryKey: ['patients', patientId],
@@ -31,8 +36,11 @@ export function PatientDetail({ patientId }: { patientId: string }) {
     mutationFn: () => api.patients.delete(patientId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['patients'] })
+      qc.invalidateQueries({ queryKey: ['patients-page'] })
+      notify('success', 'Paciente excluído')
       router.push('/patients')
     },
+    onError: (error) => notify('error', 'Não foi possível excluir o paciente', error.message),
   })
 
   // Resumo do paciente gerado pela IA com base em todos os atendimentos
@@ -40,12 +48,22 @@ export function PatientDetail({ patientId }: { patientId: string }) {
     mutationFn: () => api.patients.summary(patientId),
   })
 
-  if (isLoading) return <div className="p-6 text-slate-400">Carregando...</div>
+  const handleDelete = async () => {
+    const accepted = await confirm({
+      title: 'Excluir paciente?',
+      description: 'O paciente e todas as consultas vinculadas serão removidos. Esta ação não pode ser desfeita.',
+      confirmLabel: 'Excluir paciente',
+      danger: true,
+    })
+    if (accepted) deletePatient.mutate()
+  }
+
+  if (isLoading) return <LoadingState label="Carregando paciente..." />
   if (!patient) return <div className="p-6 text-slate-400">Paciente não encontrado</div>
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
-      <div className="flex items-center gap-3 mb-6">
+    <div className="mx-auto w-full max-w-5xl p-4 lg:p-6">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center">
         <Link href="/patients" className="btn-secondary p-2">
           <ArrowLeft className="w-4 h-4" />
         </Link>
@@ -55,15 +73,12 @@ export function PatientDetail({ patientId }: { patientId: string }) {
             {calcAge(patient.birthDate)} {patient.sex ? `· ${patient.sex}` : ''}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Link href={`/patients/${patientId}/edit`} className="btn-secondary">
             <Pencil className="w-4 h-4" /> Editar
           </Link>
           <button
-            onClick={() => {
-              if (confirm('Excluir este paciente e todas as suas consultas?'))
-                deletePatient.mutate()
-            }}
+            onClick={() => void handleDelete()}
             className="btn-secondary text-red-600 border-red-100 hover:bg-red-50"
           >
             <Trash2 className="w-4 h-4" />
@@ -83,40 +98,42 @@ export function PatientDetail({ patientId }: { patientId: string }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="card p-4">
+      <section className="mb-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="grid grid-cols-1 divide-y divide-slate-200 md:grid-cols-3 md:divide-x md:divide-y-0">
+        <div className="p-4">
           <p className="form-label">Telefone</p>
           <p className="text-sm text-slate-800">{patient.phone || '—'}</p>
         </div>
-        <div className="card p-4">
+        <div className="p-4">
           <p className="form-label">CPF</p>
           <p className="text-sm text-slate-800">{patient.cpf || '—'}</p>
         </div>
-        <div className="card p-4">
+        <div className="p-4">
           <p className="form-label">Tipo Sanguíneo</p>
           <p className="text-sm text-slate-800">{patient.bloodType || '—'}</p>
         </div>
-      </div>
+        </div>
+      </section>
 
       {(patient.allergies || patient.chronicDiseases) && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <section className="mb-4 grid grid-cols-1 overflow-hidden rounded-lg border border-slate-200 bg-white md:grid-cols-2 md:divide-x">
           {patient.allergies && (
-            <div className="card p-4 border-l-4 border-l-red-300">
+            <div className="border-l-4 border-l-red-400 bg-red-50/40 p-4">
               <p className="form-label text-red-600">Alergias</p>
               <p className="text-sm text-slate-800">{patient.allergies}</p>
             </div>
           )}
           {patient.chronicDiseases && (
-            <div className="card p-4 border-l-4 border-l-amber-300">
+            <div className="border-l-4 border-l-amber-400 bg-amber-50/40 p-4">
               <p className="form-label text-amber-600">Doenças Crônicas</p>
               <p className="text-sm text-slate-800">{patient.chronicDiseases}</p>
             </div>
           )}
-        </div>
+        </section>
       )}
 
       {(summary.isPending || summary.data) && (
-        <div className="card p-5 mb-6 border-l-4 border-l-primary-400">
+        <section className="mb-4 rounded-lg border border-primary-200 bg-white p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-3">
             <Sparkles className="w-4 h-4 text-primary-500" />
             <h2 className="text-sm font-semibold text-slate-800">Resumo do Paciente (IA)</h2>
@@ -179,7 +196,7 @@ export function PatientDetail({ patientId }: { patientId: string }) {
               )}
             </div>
           )}
-        </div>
+        </section>
       )}
 
       <div className="card">

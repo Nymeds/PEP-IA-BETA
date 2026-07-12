@@ -1,9 +1,15 @@
 'use client'
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { Consultation, ExtractedData, TabId, TabStatus } from '@/types'
+import { Consultation, ExtractedData, FieldProvenance, TabId, TabStatus } from '@/types'
 import { api } from '@/services/api'
 
 type TabStatuses = Record<TabId, TabStatus>
+
+interface LocalConsultationDraft {
+  consultation: Consultation
+  transcript: string
+  savedAt: number
+}
 
 const TAB_ORDER: TabId[] = [
   'anamnese',
@@ -61,6 +67,7 @@ function computeInitialStatuses(c: Consultation): TabStatuses {
 }
 
 export function useConsultation(initialConsultation: Consultation) {
+  const draftStorageKey = `pep-consultation-draft:${initialConsultation.id}`
   const [consultation, setConsultation] = useState<Consultation>(initialConsultation)
   const [transcript, setTranscript] = useState(initialConsultation.transcript || '')
   const [activeTab, setActiveTab] = useState<TabId>('anamnese')
@@ -71,6 +78,21 @@ export function useConsultation(initialConsultation: Consultation) {
   const [isSaving, setIsSaving] = useState(false)
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
   const [isAutoSaving, setIsAutoSaving] = useState(false)
+  const [autoSaveError, setAutoSaveError] = useState<string | null>(null)
+  const [hasPendingChanges, setHasPendingChanges] = useState(false)
+  const [recoverableDraft, setRecoverableDraft] = useState<LocalConsultationDraft | null>(() => {
+    if (typeof window === 'undefined') return null
+    try {
+      const raw = window.sessionStorage.getItem(draftStorageKey)
+      if (!raw) return null
+      const draft = JSON.parse(raw) as LocalConsultationDraft
+      return draft.savedAt > new Date(initialConsultation.updatedAt).getTime() ? draft : null
+    } catch {
+      return null
+    }
+  })
+  const manuallyEditedFieldsRef = useRef<Set<keyof Consultation>>(new Set())
+  const skipNextDraftEffectRef = useRef(false)
 
   const markTabWriting = useCallback((tabId: TabId) => {
     setTabStatuses((prev) => ({ ...prev, [tabId]: 'writing' }))
@@ -83,7 +105,7 @@ export function useConsultation(initialConsultation: Consultation) {
   }, [])
 
   const mergeExtracted = useCallback(
-    (extracted: ExtractedData) => {
+    (extracted: ExtractedData, fieldMeta: Record<string, FieldProvenance> = {}) => {
       setConsultation((prev) => {
         const updates: Partial<Consultation> = {}
 
@@ -126,10 +148,17 @@ export function useConsultation(initialConsultation: Consultation) {
         if (extracted.systemsReview && Object.keys(extracted.systemsReview).length)
           updates.systemsReview = JSON.stringify(extracted.systemsReview)
 
-        const onlyEmptyFields = Object.fromEntries(
-          Object.entries(updates).filter(([field]) => !hasContent(prev[field as keyof Consultation]))
+        const safeUpdates = Object.fromEntries(
+          Object.entries(updates).filter(([field]) => {
+            const consultationField = field as keyof Consultation
+            if (!hasContent(prev[consultationField])) return true
+            if (manuallyEditedFieldsRef.current.has(consultationField)) return false
+
+            const status = fieldMeta[field]?.status
+            return status === 'suggested' || status === 'review'
+          })
         ) as Partial<Consultation>
-        return { ...prev, ...onlyEmptyFields }
+        return { ...prev, ...safeUpdates }
       })
 
       const affectedTabs = new Set<TabId>()
@@ -194,13 +223,18 @@ export function useConsultation(initialConsultation: Consultation) {
       const updated = await api.consultations.update(consultation.id, {
         ...consultation,
         transcript,
+        manualFields: Array.from(manuallyEditedFieldsRef.current),
       })
+      skipNextDraftEffectRef.current = true
       setConsultation(updated)
       setLastSavedAt(new Date())
+      setHasPendingChanges(false)
+      setAutoSaveError(null)
+      window.sessionStorage.removeItem(draftStorageKey)
     } finally {
       setIsSaving(false)
     }
-  }, [consultation, transcript])
+  }, [consultation, draftStorageKey, transcript])
 
   // ----- AUTOSAVE: persiste no banco automaticamente (debounce) -----
   // Mantém uma referência sempre atualizada do que precisa ser salvo,
@@ -214,14 +248,32 @@ export function useConsultation(initialConsultation: Consultation) {
     const { consultation: c, transcript: t } = draftRef.current
     setIsAutoSaving(true)
     try {
-      await api.consultations.update(c.id, { ...c, transcript: t })
-      setLastSavedAt(new Date())
-    } catch (err) {
-      console.error('Autosave falhou:', err)
+      let lastError: unknown
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await api.consultations.update(c.id, {
+            ...c,
+            transcript: t,
+            manualFields: Array.from(manuallyEditedFieldsRef.current),
+          })
+          setLastSavedAt(new Date())
+          setHasPendingChanges(false)
+          setAutoSaveError(null)
+          window.sessionStorage.removeItem(draftStorageKey)
+          lastError = null
+          break
+        } catch (err) {
+          lastError = err
+          if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 500 * (attempt + 1)))
+        }
+      }
+      if (lastError) {
+        setAutoSaveError(lastError instanceof Error ? lastError.message : 'Falha ao salvar automaticamente')
+      }
     } finally {
       setIsAutoSaving(false)
     }
-  }, [])
+  }, [draftStorageKey])
 
   useEffect(() => {
     // Não salva no primeiro render (estado recém-carregado do banco)
@@ -229,23 +281,52 @@ export function useConsultation(initialConsultation: Consultation) {
       isFirstRender.current = false
       return
     }
+    if (skipNextDraftEffectRef.current) {
+      skipNextDraftEffectRef.current = false
+      return
+    }
+    setHasPendingChanges(true)
+    try {
+      window.sessionStorage.setItem(draftStorageKey, JSON.stringify({
+        consultation,
+        transcript,
+        savedAt: Date.now(),
+      } satisfies LocalConsultationDraft))
+    } catch {
+      // O autosave remoto continua ativo quando o armazenamento da sessão não está disponível.
+    }
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)
     // Salva 1,5s após a última alteração (campos, transcrição ou extração da IA)
     autoSaveTimer.current = setTimeout(persistDraft, 1500)
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current)
     }
-  }, [consultation, transcript, persistDraft])
+  }, [consultation, draftStorageKey, transcript, persistDraft])
 
   const updateField = useCallback((field: keyof Consultation, value: unknown) => {
+    manuallyEditedFieldsRef.current.add(field)
     setConsultation((prev) => ({ ...prev, [field]: value }))
   }, [])
 
   // Substitui o estado pela consulta vinda do servidor (ex: após criar nova versão)
   const applyConsultation = useCallback((c: Consultation) => {
+    skipNextDraftEffectRef.current = true
     setConsultation((prev) => ({ ...prev, ...c }))
     if (c.transcript !== undefined) setTranscript(c.transcript || '')
   }, [])
+
+  const restoreLocalDraft = useCallback(() => {
+    if (!recoverableDraft) return
+    setConsultation(recoverableDraft.consultation)
+    setTranscript(recoverableDraft.transcript)
+    setRecoverableDraft(null)
+    setHasPendingChanges(true)
+  }, [recoverableDraft])
+
+  const discardLocalDraft = useCallback(() => {
+    window.sessionStorage.removeItem(draftStorageKey)
+    setRecoverableDraft(null)
+  }, [draftStorageKey])
 
   return {
     consultation,
@@ -256,12 +337,17 @@ export function useConsultation(initialConsultation: Consultation) {
     isSaving,
     isAutoSaving,
     lastSavedAt,
+    autoSaveError,
+    hasPendingChanges,
+    recoverableDraft,
     mergeExtracted,
     addTranscript,
     applySoap,
     saveConsultation,
     updateField,
     applyConsultation,
+    restoreLocalDraft,
+    discardLocalDraft,
     TAB_ORDER,
   }
 }

@@ -9,6 +9,8 @@ export const CONSULTATION_STATUS = {
   WAITING: 'em_espera',
   IN_PROGRESS: 'em_consulta',
   FINISHED: 'finalizado',
+  CANCELED: 'cancelado',
+  NO_SHOW: 'faltou',
 } as const
 
 export type ScheduleStatus = (typeof SCHEDULE_STATUS)[keyof typeof SCHEDULE_STATUS]
@@ -139,6 +141,8 @@ export function normalizeConsultationStatus(status?: string | null): Consultatio
   if (status === 'scheduled') return CONSULTATION_STATUS.WAITING
   if (status === 'active') return CONSULTATION_STATUS.IN_PROGRESS
   if (status === 'completed') return CONSULTATION_STATUS.FINISHED
+  if (status === 'canceled' || status === CONSULTATION_STATUS.CANCELED) return CONSULTATION_STATUS.CANCELED
+  if (status === 'no_show' || status === CONSULTATION_STATUS.NO_SHOW) return CONSULTATION_STATUS.NO_SHOW
   if (status === CONSULTATION_STATUS.IN_PROGRESS) return CONSULTATION_STATUS.IN_PROGRESS
   if (status === CONSULTATION_STATUS.FINISHED) return CONSULTATION_STATUS.FINISHED
   return CONSULTATION_STATUS.WAITING

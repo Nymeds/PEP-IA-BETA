@@ -2,17 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { ClinicalSuggestion, ClinicalTemplateId, Consultation, FieldProvenance } from '@/types'
+import { ClinicalSuggestion, ClinicalTemplateId, Consultation, FieldProvenance, TabId } from '@/types'
 import { useConsultation } from '@/hooks/useConsultation'
-import { useRealtimeTranscription } from '@/hooks/useRealtimeTranscription'
+import { TranscriptionMode, useRealtimeTranscription } from '@/hooks/useRealtimeTranscription'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { api } from '@/services/api'
-import { ConfirmDialog } from './ConfirmDialog'
 import { ConsultationHeader } from './ConsultationHeader'
 import { ConversationModal } from './ConversationModal'
-import { FeedbackMessage, FeedbackToast } from './FeedbackToast'
 import { MedicalToolsPanel } from './MedicalToolsPanel'
 import { RecordingBar } from './RecordingBar'
 import { TabSidebar } from './TabSidebar'
+import { FieldReviewBar } from './FieldReviewBar'
+import { SuggestionReviewDialog } from './SuggestionReviewDialog'
+import { useFeedback } from '@/components/ui/FeedbackProvider'
+import { Button } from '@/components/ui/Button'
 import { AnamneseTab } from './tabs/AnamneseTab'
 import { AntecedentesTab } from './tabs/AntecedentesTab'
 import { CondustaTab } from './tabs/CondustaTab'
@@ -61,6 +64,14 @@ function suggestionValue(field: string, value: string): unknown {
   return value
 }
 
+const AI_TRACKED_FIELDS = new Set([
+  'chiefComplaint', 'hda', 'symptomStart', 'symptomIntensity', 'symptoms', 'improvingFactors', 'worseningFactors',
+  'previousDiseases', 'surgeries', 'hospitalizations', 'allergiesDetails', 'currentMedications', 'familyHistory',
+  'smoking', 'alcohol', 'physicalActivity', 'sleep', 'diet', 'occupation', 'systemsReview', 'vitalSigns', 'weight',
+  'height', 'generalState', 'physicalExam', 'mainHypothesis', 'differentials', 'confirmedDiagnosis', 'cid',
+  'therapeuticPlan', 'orientations', 'referrals', 'followUpDate',
+])
+
 export function ConsultationView({ consultation }: Props) {
   const {
     consultation: data,
@@ -77,16 +88,25 @@ export function ConsultationView({ consultation }: Props) {
     applyConsultation,
     isAutoSaving,
     lastSavedAt,
+    autoSaveError,
+    hasPendingChanges,
+    recoverableDraft,
+    restoreLocalDraft,
+    discardLocalDraft,
   } = useConsultation(consultation)
 
   const router = useRouter()
+  const { notify, confirm } = useFeedback()
   const [isGeneratingSoap, setIsGeneratingSoap] = useState(false)
   const [isInterpreting, setIsInterpreting] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
   const [showConversation, setShowConversation] = useState(false)
-  const [confirmCloseOpen, setConfirmCloseOpen] = useState(false)
-  const [feedback, setFeedback] = useState<FeedbackMessage | null>(null)
+  const [editingSuggestion, setEditingSuggestion] = useState<ClinicalSuggestion | null>(null)
+  const [navigationCollapsed, setNavigationCollapsed] = usePersistentState(`pep-ui:consultation-nav:${consultation.id}`, false)
+  const [toolsOpen, setToolsOpen] = usePersistentState(`pep-ui:consultation-tools:${consultation.id}`, true)
+  const [persistedTab, setPersistedTab] = usePersistentState<TabId>(`pep-ui:consultation-tab:${consultation.id}`, 'anamnese')
+  const [mobileView, setMobileView] = useState<'chart' | 'readiness' | 'tools'>('chart')
   const [lastError, setLastError] = useState<string | null>(null)
   const [suggestions, setSuggestions] = useState<ClinicalSuggestion[]>(() =>
     parseAiJson(consultation.aiState?.suggestionsJson, [])
@@ -103,16 +123,17 @@ export function ConsultationView({ consultation }: Props) {
   const REINTERPRET_EVERY = 1
   const isReinterpretingRef = useRef(false)
   const reinterpretPendingRef = useRef(false)
-
-  const notify = useCallback((kind: FeedbackMessage['kind'], title: string, description?: string) => {
-    setFeedback({ id: Date.now(), kind, title, description })
-  }, [])
+  const reinterpretForcePendingRef = useRef(false)
 
   useEffect(() => {
-    if (!feedback) return
-    const timer = window.setTimeout(() => setFeedback(null), 4500)
-    return () => window.clearTimeout(timer)
-  }, [feedback])
+    setActiveTab(persistedTab)
+  }, [persistedTab, setActiveTab])
+
+  const selectTab = useCallback((tab: TabId) => {
+    setActiveTab(tab)
+    setPersistedTab(tab)
+    setMobileView('chart')
+  }, [setActiveTab, setPersistedTab])
 
   const reportError = useCallback(
     (fallback: string, error: unknown) => {
@@ -123,19 +144,23 @@ export function ConsultationView({ consultation }: Props) {
     [notify]
   )
 
-  const runReinterpret = useCallback(async () => {
+  const runReinterpret = useCallback(async (force = false) => {
     if (isReinterpretingRef.current) {
       reinterpretPendingRef.current = true
+      reinterpretForcePendingRef.current = reinterpretForcePendingRef.current || force
       return
     }
 
     isReinterpretingRef.current = true
     setIsInterpreting(true)
     try {
-      const result = await api.consultations.reinterpret(consultation.id)
+      const result = await api.consultations.reinterpret(
+        consultation.id,
+        force ? { force: true } : undefined
+      )
       const { extracted } = result
       if (extracted && Object.keys(extracted).length > 0) {
-        mergeExtracted(extracted)
+        mergeExtracted(extracted, result.fieldMeta)
       }
       if (result.suggestions) setSuggestions(result.suggestions)
       if (result.fieldMeta) setFieldMeta(result.fieldMeta)
@@ -148,7 +173,9 @@ export function ConsultationView({ consultation }: Props) {
       setIsInterpreting(false)
       if (reinterpretPendingRef.current) {
         reinterpretPendingRef.current = false
-        void runReinterpret()
+        const pendingForce = reinterpretForcePendingRef.current
+        reinterpretForcePendingRef.current = false
+        void runReinterpret(pendingForce)
       }
     }
   }, [consultation.id, mergeExtracted, reportError])
@@ -157,6 +184,8 @@ export function ConsultationView({ consultation }: Props) {
     async (text: string, itemId: string, payload?: Record<string, unknown>) => {
       const persist = async () => {
         try {
+          // O frontend recebe a fala final do Realtime e o backend a grava
+          // como segmento ordenado antes de atualizar o transcript completo.
           const result = await api.consultations.appendRealtimeTranscript(consultation.id, {
             itemId,
             text,
@@ -184,23 +213,44 @@ export function ConsultationView({ consultation }: Props) {
   )
 
   const handleStop = useCallback(
-    async (fullBlob: Blob) => {
+    async (fullBlob: Blob, context: { mode: Exclude<TranscriptionMode, 'none'> }) => {
       try {
+        // Sempre preservamos o áudio original. Isso permite auditoria e
+        // reprocessamento sem depender exclusivamente da transcrição.
         await api.consultations.saveAudio(consultation.id, fullBlob)
+        if (context.mode === 'local') {
+          // No modo local, o Whisper é o fallback. O blob completo é enviado
+          // somente ao encerrar; useRealtimeTranscription não usa chunks de 5s.
+          const result = await api.consultations.transcribeChunk(consultation.id, fullBlob)
+          if (result.chunkTranscript) addTranscript(result.chunkTranscript)
+        }
+        // Depois de acrescentar texto, relê-se a transcrição inteira para
+        // consolidar os campos clínicos com o contexto completo.
         await runReinterpret()
       } catch (err) {
         reportError('Não foi possível salvar o áudio da consulta', err)
       }
     },
-    [consultation.id, reportError, runReinterpret]
+    [addTranscript, consultation.id, reportError, runReinterpret]
   )
 
-  const { state: recordingState, liveTranscript, startRecording, stopRecording } = useRealtimeTranscription({
+  const {
+    state: recordingState,
+    liveTranscript,
+    mode: transcriptionMode,
+    connectionError,
+    startRecording,
+    stopRecording,
+  } = useRealtimeTranscription({
     consultationId: consultation.id,
     commitIntervalMs: 8000,
     onTranscriptCompleted: handleTranscriptCompleted,
     onStop: handleStop,
   })
+
+  useEffect(() => {
+    if (connectionError) notify('info', 'Modo de gravação local ativado', connectionError)
+  }, [connectionError, notify])
 
   const displayTranscript = liveTranscript
     ? [transcript, liveTranscript].filter(Boolean).join('\n')
@@ -247,7 +297,7 @@ export function ConsultationView({ consultation }: Props) {
     try {
       const result = await api.consultations.finalize(consultation.id)
       if (result.extracted && Object.keys(result.extracted).length > 0) {
-        mergeExtracted(result.extracted)
+        mergeExtracted(result.extracted, result.fieldMeta)
       }
 
       if (result.suggestions) setSuggestions(result.suggestions)
@@ -288,12 +338,13 @@ export function ConsultationView({ consultation }: Props) {
   }, [notify, reportError, saveConsultation])
 
   const handleSuggestionAction = useCallback(
-    async (suggestion: ClinicalSuggestion, action: 'accept' | 'dismiss') => {
+    async (suggestion: ClinicalSuggestion, action: 'accept' | 'dismiss', reviewedValue?: string) => {
       try {
-        if (action === 'accept' && suggestion.field && suggestion.proposedValue) {
+        const value = reviewedValue ?? suggestion.proposedValue
+        if (action === 'accept' && suggestion.field && value) {
           updateField(
             suggestion.field as keyof Consultation,
-            suggestionValue(suggestion.field, suggestion.proposedValue)
+            suggestionValue(suggestion.field, value)
           )
         }
 
@@ -304,7 +355,7 @@ export function ConsultationView({ consultation }: Props) {
         })
         setSuggestions(result.suggestions)
         setFieldMeta(result.fieldMeta)
-        notify(action === 'accept' ? 'success' : 'info', action === 'accept' ? 'Sugestao aplicada' : 'Sugestao descartada')
+        notify(action === 'accept' ? 'success' : 'info', action === 'accept' ? 'Sugestão aplicada' : 'Sugestão descartada')
       } catch (err) {
         reportError('Nao foi possivel registrar a revisao da sugestao', err)
       }
@@ -338,9 +389,19 @@ export function ConsultationView({ consultation }: Props) {
     } catch (err) {
       reportError('Não foi possível encerrar a consulta', err)
       setIsClosing(false)
-      setConfirmCloseOpen(false)
     }
   }, [consultation.id, data.patient, notify, reportError, router, saveConsultation])
+
+  const requestClose = useCallback(async () => {
+    const pendingSuggestions = suggestions.filter((item) => item.status === 'open').length
+    const pendingSections = Object.values(tabStatuses).filter((status) => status === 'incomplete' || status === 'idle').length
+    const accepted = await confirm({
+      title: 'Encerrar consulta?',
+      description: `${pendingSections} seção(ões) ainda não estão completas e ${pendingSuggestions} sugestão(ões) seguem abertas. O prontuário será salvo antes do encerramento.`,
+      confirmLabel: 'Salvar e encerrar',
+    })
+    if (accepted) await confirmClose()
+  }, [confirm, confirmClose, suggestions, tabStatuses])
 
   const handleCopyText = useCallback(
     (label: string, text: string) => {
@@ -395,29 +456,107 @@ export function ConsultationView({ consultation }: Props) {
     printWindow.print()
   }, [data, notify])
 
+  const handleFieldChange = useCallback((field: keyof Consultation, value: unknown) => {
+    updateField(field, value)
+    if (!AI_TRACKED_FIELDS.has(String(field))) return
+    setFieldMeta((current) => ({
+      ...current,
+      [field]: current[String(field)]
+        ? { ...current[String(field)], status: 'manual' }
+        : {
+          field: field as FieldProvenance['field'],
+          status: 'manual',
+          source: 'unknown',
+          speaker: 'Indefinido',
+          confidence: 'high',
+          requiresReview: false,
+          evidence: [],
+        },
+    }))
+  }, [updateField])
+
+  const toggleTools = useCallback(() => {
+    if (window.matchMedia('(max-width: 767px)').matches) {
+      setMobileView((current) => current === 'tools' ? 'chart' : 'tools')
+      return
+    }
+    setToolsOpen((current) => !current)
+  }, [setToolsOpen])
+
+  useEffect(() => {
+    const tabs: TabId[] = ['anamnese', 'antecedentes', 'habitos', 'revisao_sistemas', 'exame_fisico', 'diagnostico', 'conduta', 'soap']
+    const onKeyDown = (event: KeyboardEvent) => {
+      const command = event.ctrlKey || event.metaKey
+      if (command && event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        void handleManualSave()
+        return
+      }
+      if (command && event.shiftKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault()
+        toggleTools()
+        return
+      }
+      if (command && event.shiftKey && event.key.toLowerCase() === 'm' && isInProgress) {
+        event.preventDefault()
+        if (recordingState === 'recording') handleStopRecording()
+        else if (recordingState === 'idle') handleStartRecording()
+        return
+      }
+      if (event.altKey && /^[1-8]$/.test(event.key)) {
+        event.preventDefault()
+        selectTab(tabs[Number(event.key) - 1])
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [handleManualSave, handleStartRecording, handleStopRecording, isInProgress, recordingState, selectTab, toggleTools])
+
   const tabContent = {
-    anamnese: <AnamneseTab data={data} onChange={updateField} />,
-    antecedentes: <AntecedentesTab data={data} onChange={updateField} />,
-    habitos: <HabitosTab data={data} onChange={updateField} />,
-    revisao_sistemas: <RevisaoSistemasTab data={data} onChange={updateField} />,
-    exame_fisico: <ExameFisicoTab data={data} onChange={updateField} />,
-    diagnostico: <DiagnosticoTab data={data} onChange={updateField} />,
-    conduta: <CondustaTab data={data} onChange={updateField} />,
-    soap: <SoapTab data={data} onChange={updateField} />,
+    anamnese: <AnamneseTab data={data} onChange={handleFieldChange} />,
+    antecedentes: <AntecedentesTab data={data} onChange={handleFieldChange} />,
+    habitos: <HabitosTab data={data} onChange={handleFieldChange} />,
+    revisao_sistemas: <RevisaoSistemasTab data={data} onChange={handleFieldChange} />,
+    exame_fisico: <ExameFisicoTab data={data} onChange={handleFieldChange} />,
+    diagnostico: <DiagnosticoTab data={data} onChange={handleFieldChange} />,
+    conduta: <CondustaTab data={data} onChange={handleFieldChange} />,
+    soap: <SoapTab data={data} onChange={handleFieldChange} />,
   }
 
-  return (
-    <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
-      <FeedbackToast message={feedback} onClose={() => setFeedback(null)} />
+  const renderTools = (className?: string) => (
+    <MedicalToolsPanel
+      consultation={data}
+      tabStatuses={tabStatuses}
+      recordingState={recordingState}
+      isInterpreting={isInterpreting}
+      isGeneratingSoap={isGeneratingSoap}
+      lastError={lastError}
+      templateId={templateId}
+      suggestions={suggestions}
+      fieldMeta={fieldMeta}
+      onSelectTab={selectTab}
+      onReinterpret={() => void runReinterpret(true)}
+      onTemplateChange={handleTemplateChange}
+      onAcceptSuggestion={(suggestion) => void handleSuggestionAction(suggestion, 'accept')}
+      onEditSuggestion={setEditingSuggestion}
+      onDismissSuggestion={(suggestion) => void handleSuggestionAction(suggestion, 'dismiss')}
+      onOpenConversation={() => setShowConversation(true)}
+      onGenerateSoap={handleFinalize}
+      onCopyText={handleCopyText}
+      onPrintSoap={handlePrintSoap}
+      className={className}
+    />
+  )
 
-      <ConfirmDialog
-        open={confirmCloseOpen}
-        title="Encerrar consulta?"
-        description="Os dados serão salvos e a consulta será marcada como concluída. Pare a gravação antes de encerrar."
-        confirmLabel="Encerrar consulta"
-        loading={isClosing}
-        onClose={() => setConfirmCloseOpen(false)}
-        onConfirm={confirmClose}
+  return (
+    <div className="consultation-compact flex h-dvh flex-col overflow-hidden bg-slate-100">
+      <SuggestionReviewDialog
+        suggestion={editingSuggestion}
+        onClose={() => setEditingSuggestion(null)}
+        onConfirm={(suggestion, value) => {
+          setEditingSuggestion(null)
+          void handleSuggestionAction(suggestion, 'accept', value)
+        }}
       />
 
       <ConsultationHeader
@@ -429,11 +568,15 @@ export function ConsultationView({ consultation }: Props) {
         isAutoSaving={isAutoSaving}
         lastSavedAt={lastSavedAt}
         recordingState={recordingState}
+        hasPendingChanges={hasPendingChanges}
+        autoSaveError={autoSaveError}
+        toolsOpen={toolsOpen || mobileView === 'tools'}
         onSave={handleManualSave}
         onStart={handleStart}
         onFinalize={handleFinalize}
-        onClose={() => setConfirmCloseOpen(true)}
+        onClose={() => void requestClose()}
         onOpenConversation={() => setShowConversation(true)}
+        onToggleTools={toggleTools}
       />
 
       {showConversation ? (
@@ -447,55 +590,72 @@ export function ConsultationView({ consultation }: Props) {
         />
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <TabSidebar activeTab={activeTab} tabStatuses={tabStatuses} onTabChange={setActiveTab} />
+      <div className="flex border-b border-slate-200 bg-white p-1 md:hidden" role="tablist" aria-label="Área da consulta">
+        {([
+          ['chart', 'Prontuário'],
+          ['readiness', 'Revisão'],
+          ['tools', 'Ferramentas'],
+        ] as const).map(([id, label]) => (
+          <button key={id} type="button" onClick={() => setMobileView(id)} className={`flex-1 rounded-md px-2 py-2 text-xs font-medium ${mobileView === id ? 'bg-primary-50 text-primary-700' : 'text-slate-500'}`} role="tab" aria-selected={mobileView === id}>{label}</button>
+        ))}
+      </div>
 
-        <div className="flex min-w-0 flex-1 flex-col xl:flex-row">
-          <main className="min-h-0 flex-1 overflow-y-auto bg-slate-100">
-            <div className="mx-auto w-full max-w-5xl animate-fade-in px-5 py-5 lg:px-7 lg:py-6">
-              {isWaiting ? (
-                <div className="mb-5 flex flex-col gap-4 rounded-lg border border-amber-200 bg-amber-50/80 px-4 py-3.5 shadow-sm md:flex-row md:items-center md:justify-between">
-                  <div>
-                  <p className="text-sm font-semibold text-amber-900">Consulta em espera</p>
-                  <p className="mt-1 max-w-3xl text-sm leading-relaxed text-amber-800">
-                    O prontuário está reservado, mas a sessão ainda não foi iniciada. Isso evita chamadas
-                    duplicadas e garante apenas uma consulta em andamento por médico.
-                  </p>
-                  </div>
-                  <button type="button" onClick={handleStart} disabled={isStarting} className="btn-primary shrink-0">
-                    {isStarting ? 'Iniciando...' : 'Iniciar consulta agora'}
-                  </button>
-                </div>
-              ) : null}
-              {tabContent[activeTab]}
-            </div>
-          </main>
-
-          <MedicalToolsPanel
-            consultation={data}
-            tabStatuses={tabStatuses}
-            recordingState={recordingState}
-            isInterpreting={isInterpreting}
-            isGeneratingSoap={isGeneratingSoap}
-            lastError={lastError}
-            templateId={templateId}
-            suggestions={suggestions}
-            fieldMeta={fieldMeta}
-            onSelectTab={setActiveTab}
-            onTemplateChange={handleTemplateChange}
-            onAcceptSuggestion={(suggestion) => void handleSuggestionAction(suggestion, 'accept')}
-            onDismissSuggestion={(suggestion) => void handleSuggestionAction(suggestion, 'dismiss')}
-            onOpenConversation={() => setShowConversation(true)}
-            onGenerateSoap={handleFinalize}
-            onCopyText={handleCopyText}
-            onPrintSoap={handlePrintSoap}
-          />
+      <div className="flex min-h-0 flex-1">
+        <div className={mobileView === 'chart' ? 'contents' : 'hidden md:contents'}>
+          <TabSidebar activeTab={activeTab} tabStatuses={tabStatuses} onTabChange={selectTab} collapsed={navigationCollapsed} onToggle={() => setNavigationCollapsed((current) => !current)} />
         </div>
+
+        <main className={`${mobileView === 'chart' ? 'block' : 'hidden'} min-h-0 min-w-0 flex-1 overflow-y-auto bg-slate-100 md:block`}>
+          <div className="mx-auto w-full max-w-6xl animate-fade-in px-3 py-3 lg:px-5 lg:py-4">
+            {recoverableDraft ? (
+              <div className="mb-3 flex flex-col gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between" role="alert">
+                <div><p className="text-sm font-semibold text-blue-900">Rascunho local encontrado</p><p className="mt-0.5 text-xs text-blue-700">Há alterações mais recentes nesta sessão que ainda não chegaram ao servidor.</p></div>
+                <div className="flex gap-2"><Button size="sm" onClick={discardLocalDraft}>Descartar</Button><Button size="sm" variant="primary" onClick={restoreLocalDraft}>Recuperar rascunho</Button></div>
+              </div>
+            ) : null}
+            {autoSaveError ? (
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5" role="alert"><p className="text-xs text-red-700">Autosave pendente: {autoSaveError}</p><Button size="sm" onClick={() => void handleManualSave()}>Tentar salvar</Button></div>
+            ) : null}
+            {isWaiting ? (
+              <div className="mb-3 flex flex-col gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div><p className="text-sm font-semibold text-amber-900">Consulta em espera</p><p className="mt-0.5 text-xs text-amber-800">Inicie o atendimento para liberar gravação, preenchimento por IA e encerramento.</p></div>
+                <Button variant="primary" onClick={handleStart} disabled={isStarting}>{isStarting ? 'Iniciando...' : 'Iniciar consulta'}</Button>
+              </div>
+            ) : null}
+            <FieldReviewBar activeTab={activeTab} fieldMeta={fieldMeta} tabStatus={tabStatuses[activeTab]} />
+            {tabContent[activeTab]}
+          </div>
+        </main>
+
+        <section className={`${mobileView === 'readiness' ? 'block' : 'hidden'} min-h-0 flex-1 overflow-y-auto bg-slate-100 p-3 md:hidden`} role="tabpanel">
+          <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+            <div className="border-b border-slate-200 px-4 py-3"><h2 className="text-sm font-semibold text-slate-950">Revisão antes do SOAP</h2><p className="mt-0.5 text-xs text-slate-500">Abra cada seção pendente antes de finalizar.</p></div>
+            <div className="divide-y divide-slate-100">
+              {Object.entries(tabStatuses).map(([tab, status]) => <button key={tab} type="button" onClick={() => selectTab(tab as TabId)} className="flex w-full items-center justify-between px-4 py-3 text-left"><span className="text-sm font-medium capitalize text-slate-800">{tab.replaceAll('_', ' ')}</span><span className={`rounded px-2 py-1 text-[11px] ${status === 'complete' ? 'bg-emerald-50 text-emerald-700' : status === 'writing' ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>{status === 'complete' ? 'Completo' : status === 'writing' ? 'IA preenchendo' : 'Revisar'}</span></button>)}
+            </div>
+            <div className="border-t border-slate-200 p-4"><p className="mb-3 text-xs text-slate-600">{suggestions.filter((item) => item.status === 'open').length} sugestão(ões) aberta(s).</p><Button variant="primary" className="w-full" onClick={handleFinalize} disabled={isGeneratingSoap || recordingState !== 'idle'}>Gerar SOAP</Button></div>
+          </div>
+        </section>
+
+        <section className={`${mobileView === 'tools' ? 'block' : 'hidden'} min-h-0 flex-1 overflow-y-auto md:hidden`} role="tabpanel">
+          {renderTools('border-0')}
+        </section>
+
+        {toolsOpen ? <div className="hidden w-80 shrink-0 overflow-y-auto border-l border-slate-200 xl:block">{renderTools()}</div> : null}
+
+        {toolsOpen ? (
+          <div className="fixed inset-0 z-40 hidden md:block xl:hidden">
+            <button type="button" className="absolute inset-0 bg-slate-950/35" onClick={() => setToolsOpen(false)} aria-label="Fechar ferramentas médicas" />
+            <div className="absolute inset-y-0 right-0 w-[min(360px,92vw)] overflow-y-auto border-l border-slate-200 bg-white shadow-xl">{renderTools()}</div>
+          </div>
+        ) : null}
       </div>
 
       {isInProgress ? (
         <RecordingBar
           recordingState={recordingState}
+          transcriptionMode={transcriptionMode}
+          connectionError={connectionError}
           transcript={displayTranscript}
           isInterpreting={isInterpreting}
           onStart={handleStartRecording}

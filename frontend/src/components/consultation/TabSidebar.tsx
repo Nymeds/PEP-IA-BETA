@@ -13,6 +13,8 @@ import {
   Search,
   Stethoscope,
   Target,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 import { cn } from '../shared/utils'
 
@@ -45,16 +47,25 @@ interface Props {
   activeTab: TabId
   tabStatuses: Record<TabId, TabStatus>
   onTabChange: (tab: TabId) => void
+  collapsed?: boolean
+  onToggle?: () => void
 }
 
-export function TabSidebar({ activeTab, tabStatuses, onTabChange }: Props) {
+export function TabSidebar({ activeTab, tabStatuses, onTabChange, collapsed = false, onToggle }: Props) {
   const completed = Object.values(tabStatuses).filter((status) => status === 'complete').length
 
   return (
-    <aside className="w-full flex-shrink-0 overflow-x-auto border-b border-slate-200 bg-slate-50/80 lg:w-52 lg:overflow-y-auto lg:border-b-0 lg:border-r">
-      <div className="hidden border-b border-slate-200 px-4 py-3 lg:block">
+    <aside className={cn('w-full flex-shrink-0 overflow-x-auto border-b border-slate-200 bg-slate-50/80 transition-[width] lg:overflow-y-auto lg:border-b-0 lg:border-r', collapsed ? 'lg:w-14' : 'lg:w-48')}>
+      <div className={cn('hidden border-b border-slate-200 py-3 lg:block', collapsed ? 'px-2 text-center' : 'px-3')}>
+        {onToggle ? (
+          <button type="button" onClick={onToggle} className="mb-2 inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-500 hover:bg-white hover:text-slate-800" aria-label={collapsed ? 'Expandir seções do prontuário' : 'Recolher seções do prontuário'} title={collapsed ? 'Expandir prontuário' : 'Recolher prontuário'}>
+            {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </button>
+        ) : null}
+        {!collapsed ? <>
         <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">Prontuário</p>
         <p className="mt-1 text-xs text-slate-500">{completed}/{TABS.length} seções completas</p>
+        </> : <span className="sr-only">{completed} de {TABS.length} seções completas</span>}
       </div>
 
       <div className="flex gap-1 p-2 lg:flex-col">
@@ -68,7 +79,8 @@ export function TabSidebar({ activeTab, tabStatuses, onTabChange }: Props) {
               type="button"
               onClick={() => onTabChange(id)}
               className={cn(
-                'group flex min-w-[154px] items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors lg:min-w-0 lg:w-full',
+                'group flex min-w-[154px] items-center rounded-md border py-2.5 text-left transition-colors lg:min-w-0 lg:w-full',
+                collapsed ? 'justify-center gap-0 px-2' : 'gap-2.5 px-3',
                 isActive
                   ? 'border-primary-100 bg-white text-primary-700 shadow-sm'
                   : 'border-transparent text-slate-600 hover:border-slate-200 hover:bg-white hover:text-slate-900'
@@ -80,11 +92,11 @@ export function TabSidebar({ activeTab, tabStatuses, onTabChange }: Props) {
                   isActive ? 'text-primary-600' : 'text-slate-400 group-hover:text-slate-600'
                 )}
               />
-              <span className="min-w-0 flex-1">
+              <span className={cn('min-w-0 flex-1', collapsed && 'lg:hidden')}>
                 <span className="block truncate text-xs font-semibold leading-tight">{label}</span>
                 <span className="mt-0.5 block text-[10px] text-slate-400">{STATUS_LABEL[status]}</span>
               </span>
-              <StatusIcon status={status} />
+              <span className={cn(collapsed && 'lg:hidden')}><StatusIcon status={status} /></span>
             </button>
           )
         })}

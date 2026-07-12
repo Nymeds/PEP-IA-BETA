@@ -16,6 +16,7 @@ import {
 import { api } from '@/services/api'
 import { ScheduleAgenda, ScheduleShift, ScheduleStatus } from '@/types'
 import { cn } from '../shared/utils'
+import { useFeedback } from '@/components/ui/FeedbackProvider'
 
 const weekdayOptions = [
   { value: 0, label: 'Domingo', short: 'Dom' },
@@ -134,6 +135,7 @@ function MetricPanel({
 
 export function AgendasSettingsManager() {
   const qc = useQueryClient()
+  const { confirm, notify } = useFeedback()
   const [selectedAgendaId, setSelectedAgendaId] = useState<string | null>(null)
   const [form, setForm] = useState<AgendaFormState>(defaultFormState)
   const [isCreating, setIsCreating] = useState(false)
@@ -145,7 +147,7 @@ export function AgendasSettingsManager() {
     queryFn: () => api.schedule.agendas(),
   })
 
-  const agendas = agendasQuery.data?.agendas || []
+  const agendas = useMemo(() => agendasQuery.data?.agendas || [], [agendasQuery.data?.agendas])
   const specialtyOptions = useMemo(
     () => Array.from(new Set(agendas.map((agenda) => agenda.specialty))).sort(),
     [agendas]
@@ -155,6 +157,19 @@ export function AgendasSettingsManager() {
     if (specialtyFilter === 'todas') return agendas
     return agendas.filter((agenda) => agenda.specialty === specialtyFilter)
   }, [agendas, specialtyFilter])
+
+  const selectedAgendaForBaseline = agendas.find((agenda) => agenda.id === selectedAgendaId)
+  const baselineForm = selectedAgendaForBaseline ? toFormState(selectedAgendaForBaseline) : defaultFormState
+  const isDirty = JSON.stringify(form) !== JSON.stringify(baselineForm)
+
+  useEffect(() => {
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!isDirty) return
+      event.preventDefault()
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [isDirty])
 
   useEffect(() => {
     if (isCreating) return
@@ -193,11 +208,11 @@ export function AgendasSettingsManager() {
       setIsCreating(false)
       setForm(toFormState(response.agenda))
       setActiveTopic('revisao')
+      notify('success', isCreating ? 'Agenda criada' : 'Agenda atualizada')
     },
+    onError: (error) => notify('error', 'Não foi possível salvar a agenda', error.message),
   })
 
-  const selectedAgenda =
-    agendas.find((agenda) => agenda.id === selectedAgendaId) || (isCreating ? null : filteredAgendas[0] || agendas[0] || null)
   const enabledShiftCount = useMemo(() => countEnabledShifts(form.shifts), [form.shifts])
   const maxAppointmentsPerDay = useMemo(() => countMaxAppointments(form.shifts), [form.shifts])
   const activeAgendasCount = useMemo(
@@ -208,11 +223,44 @@ export function AgendasSettingsManager() {
     () => form.shifts.filter((shift) => shift.enabled && shift.slots > 0),
     [form.shifts]
   )
+  const shiftConflicts = useMemo(() => {
+    const active = form.shifts.filter((shift) => shift.enabled && shift.slots > 0)
+    const conflicts: string[] = []
+    for (let index = 0; index < active.length; index += 1) {
+      const current = active[index]
+      if (!current.start || !current.end || current.start >= current.end) {
+        conflicts.push(`${current.label}: o início deve ser anterior ao fim`)
+        continue
+      }
+      for (let otherIndex = index + 1; otherIndex < active.length; otherIndex += 1) {
+        const other = active[otherIndex]
+        if (current.start < other.end && other.start < current.end) {
+          conflicts.push(`${current.label} conflita com ${other.label}`)
+        }
+      }
+    }
+    return conflicts
+  }, [form.shifts])
 
-  const handleSelectAgenda = (agenda: ScheduleAgenda) => {
+  const handleSelectAgenda = async (agenda: ScheduleAgenda) => {
+    if (isDirty) {
+      const accepted = await confirm({ title: 'Descartar alterações?', description: 'Há mudanças nesta agenda que ainda não foram salvas.', confirmLabel: 'Descartar e continuar', danger: true })
+      if (!accepted) return
+    }
     setSelectedAgendaId(agenda.id)
     setIsCreating(false)
     setForm(toFormState(agenda))
+    setActiveTopic('identificacao')
+  }
+
+  const handleStartCreate = async () => {
+    if (isDirty) {
+      const accepted = await confirm({ title: 'Descartar alterações?', description: 'Há mudanças nesta agenda que ainda não foram salvas.', confirmLabel: 'Descartar e criar nova', danger: true })
+      if (!accepted) return
+    }
+    setIsCreating(true)
+    setSelectedAgendaId(null)
+    setForm(defaultFormState)
     setActiveTopic('identificacao')
   }
 
@@ -258,12 +306,7 @@ export function AgendasSettingsManager() {
 
         <button
           type="button"
-          onClick={() => {
-            setIsCreating(true)
-            setSelectedAgendaId(null)
-            setForm(defaultFormState)
-            setActiveTopic('identificacao')
-          }}
+          onClick={() => void handleStartCreate()}
           className="btn-primary"
         >
           <Plus className="h-4 w-4" />
@@ -336,7 +379,7 @@ export function AgendasSettingsManager() {
                     <button
                       key={agenda.id}
                       type="button"
-                      onClick={() => handleSelectAgenda(agenda)}
+                      onClick={() => void handleSelectAgenda(agenda)}
                       className={cn(
                         'w-full px-4 py-4 text-left transition-colors',
                         isSelected ? 'bg-primary-50' : 'bg-white hover:bg-slate-50'
@@ -790,12 +833,19 @@ export function AgendasSettingsManager() {
           </section>
 
           {saveMutation.isError && (
-            <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
               {saveMutation.error.message}
             </div>
           )}
 
-          <section className="rounded-xl border border-slate-200 bg-white px-6 py-4">
+          {shiftConflicts.length ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3" role="alert">
+              <p className="text-sm font-semibold text-amber-900">Revise os horários antes de salvar</p>
+              {shiftConflicts.map((conflict) => <p key={conflict} className="mt-1 text-xs text-amber-800">{conflict}</p>)}
+            </div>
+          ) : null}
+
+          <section className="rounded-lg border border-slate-200 bg-white px-6 py-4">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <p className="text-sm font-semibold text-slate-900">
@@ -817,7 +867,7 @@ export function AgendasSettingsManager() {
                 <button
                   type="button"
                   onClick={() => saveMutation.mutate()}
-                  disabled={saveMutation.isPending}
+                  disabled={saveMutation.isPending || shiftConflicts.length > 0 || !isDirty}
                   className="btn-primary justify-center"
                 >
                   <Save className="h-4 w-4" />

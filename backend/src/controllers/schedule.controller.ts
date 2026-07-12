@@ -50,6 +50,12 @@ interface QuickBookBody {
   scheduledAt?: string
 }
 
+interface AppointmentOperationBody {
+  operation?: 'reschedule' | 'cancel' | 'no_show'
+  scheduledAt?: string
+  reason?: string
+}
+
 interface ScheduleRecord {
   id: string
   userId: string
@@ -173,7 +179,8 @@ async function listDayAppointments(userId: string, dateString: string) {
 async function validateAgendaSlot(
   userId: string,
   agenda: ScheduleRecord,
-  requestedAt: Date
+  requestedAt: Date,
+  excludeConsultationId?: string
 ) {
   if (requestedAt.getTime() < Date.now() - 60_000) {
     throw createHttpError('Nao e possivel agendar consultas no passado', 400)
@@ -190,7 +197,12 @@ async function validateAgendaSlot(
   }
 
   const dayAppointments = await listDayAppointments(userId, dateString)
-  if (dayAppointments.length >= getMaxAppointmentsPerDay(settings)) {
+  const blockingAppointments = dayAppointments.filter(
+    (appointment) =>
+      appointment.id !== excludeConsultationId &&
+      normalizeConsultationStatus(appointment.status) !== CONSULTATION_STATUS.CANCELED
+  )
+  if (blockingAppointments.length >= getMaxAppointmentsPerDay(settings)) {
     throw createHttpError('Nao ha mais vagas disponiveis para este dia', 409)
   }
 
@@ -201,7 +213,7 @@ async function validateAgendaSlot(
   }
 
   if (
-    dayAppointments.some(
+    blockingAppointments.some(
       (appointment) =>
         appointment.scheduledAt &&
         formatLocalDateTime(new Date(appointment.scheduledAt)) === requestedLocalDateTime
@@ -210,7 +222,7 @@ async function validateAgendaSlot(
     throw createHttpError('Este horario ja esta ocupado por outra consulta deste medico', 409)
   }
 
-  return { settings, dayAppointments }
+  return { settings, dayAppointments: blockingAppointments }
 }
 
 function parseAgendaPayload(body: ScheduleSettingsBody) {
@@ -504,8 +516,11 @@ export async function getAvailableSlots(
     const appointments = await listDayAppointments(req.authUser!.id, input)
 
     const generatedSlots = availability.allowed ? generateSlotsForDate(input, settings) : []
+    const blockingAppointments = appointments.filter(
+      (appointment) => normalizeConsultationStatus(appointment.status) !== CONSULTATION_STATUS.CANCELED
+    )
     const appointmentsBySlot = new Map(
-      appointments
+      blockingAppointments
         .filter((appointment) => appointment.scheduledAt)
         .map((appointment) => [
           formatLocalDateTime(new Date(appointment.scheduledAt as Date)),
@@ -521,7 +536,7 @@ export async function getAvailableSlots(
       agenda: serializeAgenda(agenda),
       enabledShiftCount: getEnabledShiftCount(settings),
       maxAppointmentsPerDay: getMaxAppointmentsPerDay(settings),
-      occupiedCount: appointments.length,
+      occupiedCount: blockingAppointments.length,
       slots: generatedSlots.map((slot) => ({
         ...slot,
         available: !appointmentsBySlot.has(slot.localDateTime),
@@ -599,24 +614,119 @@ export async function quickBookAppointment(
       return reply.status(404).send({ error: 'Paciente nao encontrado para este usuario' })
     }
 
-    const consultation = await prisma.consultation.create({
-      data: {
-        userId,
-        patientId: patient.id,
-        scheduleId: agenda.id,
-        status: CONSULTATION_STATUS.WAITING,
-        scheduledAt: requestedAt,
-      },
-      include: {
-        patient: true,
-        schedule: true,
-      },
+    const consultation = await prisma.$transaction(async (tx) => {
+      const created = await tx.consultation.create({
+        data: {
+          userId,
+          patientId: patient.id,
+          scheduleId: agenda.id,
+          status: CONSULTATION_STATUS.WAITING,
+          scheduledAt: requestedAt,
+        },
+        include: {
+          patient: true,
+          schedule: true,
+        },
+      })
+      await tx.consultationAppointmentEvent.create({
+        data: {
+          consultationId: created.id,
+          operation: 'book',
+          scheduledAt: requestedAt,
+          status: CONSULTATION_STATUS.WAITING,
+        },
+      })
+      return created
     })
 
     return reply.status(201).send(consultation)
   } catch (error) {
     return reply.status(getErrorStatus(error, 400)).send({
       error: error instanceof Error ? error.message : 'Nao foi possivel agendar a consulta',
+    })
+  }
+}
+
+export async function updateAppointment(
+  req: FastifyRequest<{ Params: { consultationId: string }; Body: AppointmentOperationBody }>,
+  reply: FastifyReply
+) {
+  try {
+    const userId = req.authUser!.id
+    const operation = req.body?.operation
+    const reason = req.body?.reason?.trim() || ''
+    if (!operation || !['reschedule', 'cancel', 'no_show'].includes(operation)) {
+      return reply.status(400).send({ error: 'Operacao de agendamento invalida' })
+    }
+    if (!reason) {
+      return reply.status(400).send({ error: 'Informe o motivo da alteracao do agendamento' })
+    }
+
+    const prisma = getPrisma()
+    const consultation = await prisma.consultation.findFirst({
+      where: { id: req.params.consultationId, userId },
+      include: { patient: true, schedule: true },
+    })
+    if (!consultation) return reply.status(404).send({ error: 'Agendamento nao encontrado' })
+
+    const currentStatus = normalizeConsultationStatus(consultation.status)
+    if (
+      currentStatus === CONSULTATION_STATUS.IN_PROGRESS ||
+      currentStatus === CONSULTATION_STATUS.FINISHED
+    ) {
+      return reply.status(409).send({ error: 'Consultas iniciadas ou finalizadas nao podem alterar o agendamento' })
+    }
+
+    let nextScheduledAt = consultation.scheduledAt
+    let nextStatus: string = consultation.status
+
+    if (operation === 'reschedule') {
+      const scheduledAt = req.body?.scheduledAt?.trim() || ''
+      const requestedAt = new Date(scheduledAt)
+      if (!scheduledAt || Number.isNaN(requestedAt.getTime())) {
+        return reply.status(400).send({ error: 'Informe uma nova data e hora validas' })
+      }
+      if (!consultation.schedule) {
+        return reply.status(409).send({ error: 'A consulta nao possui uma agenda vinculada' })
+      }
+      const agenda = await findOwnedAgenda(consultation.schedule.id, userId)
+      if (!agenda) return reply.status(404).send({ error: 'Agenda nao encontrada' })
+      await validateAgendaSlot(userId, agenda, requestedAt, consultation.id)
+      nextScheduledAt = requestedAt
+      nextStatus = CONSULTATION_STATUS.WAITING
+    } else if (operation === 'cancel') {
+      nextStatus = CONSULTATION_STATUS.CANCELED
+    } else {
+      if (consultation.scheduledAt && consultation.scheduledAt.getTime() > Date.now() + 5 * 60_000) {
+        return reply.status(400).send({ error: 'A falta so pode ser registrada no horario da consulta ou depois' })
+      }
+      nextStatus = CONSULTATION_STATUS.NO_SHOW
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const saved = await tx.consultation.update({
+        where: { id: consultation.id },
+        data: { scheduledAt: nextScheduledAt, status: nextStatus },
+        include: { patient: true, schedule: true },
+      })
+      await tx.consultationAppointmentEvent.create({
+        data: {
+          consultationId: consultation.id,
+          operation,
+          previousScheduledAt: consultation.scheduledAt,
+          scheduledAt: nextScheduledAt,
+          previousStatus: consultation.status,
+          status: nextStatus,
+          reason,
+        },
+      })
+      return saved
+    })
+
+    return reply.send(updated)
+  } catch (error) {
+    return reply.status(getErrorStatus(error, 400)).send({
+      error: error instanceof Error ? error.message : 'Nao foi possivel alterar o agendamento',
     })
   }
 }

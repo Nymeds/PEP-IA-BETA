@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/services/api'
 
 export type RecordingState = 'idle' | 'recording' | 'processing'
+export type TranscriptionMode = 'none' | 'realtime' | 'local'
 
 interface UseRealtimeTranscriptionOptions {
   consultationId: string
@@ -13,7 +14,7 @@ interface UseRealtimeTranscriptionOptions {
     itemId: string,
     payload?: Record<string, unknown>
   ) => Promise<void>
-  onStop?: (fullBlob: Blob) => Promise<void>
+  onStop?: (fullBlob: Blob, context: { mode: Exclude<TranscriptionMode, 'none'> }) => Promise<void>
 }
 
 interface RealtimeEventPayload {
@@ -35,6 +36,8 @@ export function useRealtimeTranscription({
 }: UseRealtimeTranscriptionOptions) {
   const [state, setState] = useState<RecordingState>('idle')
   const [liveTranscript, setLiveTranscript] = useState('')
+  const [mode, setMode] = useState<TranscriptionMode>('none')
+  const [connectionError, setConnectionError] = useState<string | null>(null)
 
   const streamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -45,6 +48,11 @@ export function useRealtimeTranscription({
   const audioChunksRef = useRef<Blob[]>([])
   const partialItemsRef = useRef(new Map<string, string>())
   const pendingPersistsRef = useRef(new Set<Promise<void>>())
+  const modeRef = useRef<TranscriptionMode>('none')
+
+  // O áudio local é mantido mesmo quando o Realtime está funcionando.
+  // Ele serve como cópia completa para auditoria e como fallback caso a
+  // conexão WebRTC caia durante a consulta.
 
   const syncLiveTranscript = useCallback(() => {
     const text = Array.from(partialItemsRef.current.values())
@@ -68,7 +76,7 @@ export function useRealtimeTranscription({
     return true
   }, [])
 
-  const cleanupRealtimeResources = useCallback(() => {
+  const cleanupRealtimeConnection = useCallback(() => {
     if (commitTimerRef.current) {
       clearInterval(commitTimerRef.current)
       commitTimerRef.current = null
@@ -77,12 +85,28 @@ export function useRealtimeTranscription({
     dataChannelRef.current?.close()
     dataChannelRef.current = null
 
+    if (peerConnectionRef.current) peerConnectionRef.current.onconnectionstatechange = null
     peerConnectionRef.current?.close()
     peerConnectionRef.current = null
 
+  }, [])
+
+  const cleanupRealtimeResources = useCallback(() => {
+    cleanupRealtimeConnection()
     streamRef.current?.getTracks().forEach((track) => track.stop())
     streamRef.current = null
-  }, [])
+  }, [cleanupRealtimeConnection])
+
+  const switchToLocalFallback = useCallback((message: string) => {
+    // O fallback não envia chunks continuamente: o áudio inteiro é enviado
+    // ao parar a gravação, em ConsultationView.handleStop.
+    if (modeRef.current === 'local') return
+    cleanupRealtimeConnection()
+    modeRef.current = 'local'
+    setMode('local')
+    setConnectionError(message)
+    setState('recording')
+  }, [cleanupRealtimeConnection])
 
   const waitForPendingTranscripts = useCallback(async (timeoutMs: number) => {
     const deadline = Date.now() + timeoutMs
@@ -200,6 +224,9 @@ export function useRealtimeTranscription({
     audioChunksRef.current = []
     partialItemsRef.current.clear()
     setLiveTranscript('')
+    setConnectionError(null)
+    setMode('none')
+    modeRef.current = 'none'
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -222,59 +249,61 @@ export function useRealtimeTranscription({
         }
       }
       recorderRef.current = recorder
-
-      const { value: ephemeralKey } = await api.consultations.createRealtimeToken(consultationId)
-
-      const peerConnection = new RTCPeerConnection()
-      peerConnection.onconnectionstatechange = () => {
-        if (peerConnection.connectionState === 'failed') {
-          console.error('Conexao Realtime falhou')
-        }
-      }
-
-      stream.getAudioTracks().forEach((track) => {
-        peerConnection.addTrack(track, stream)
-      })
-
-      const dataChannel = peerConnection.createDataChannel('oai-events')
-      dataChannel.addEventListener('message', handleRealtimeMessage)
-
-      const offer = await peerConnection.createOffer()
-      if (!offer.sdp) {
-        throw new Error('Nao foi possivel criar a oferta SDP do Realtime')
-      }
-      await peerConnection.setLocalDescription(offer)
-
-      const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST',
-        body: offer.sdp,
-        headers: {
-          Authorization: `Bearer ${ephemeralKey}`,
-          'Content-Type': 'application/sdp',
-        },
-      })
-
-      if (!sdpResponse.ok) {
-        const errorText = await sdpResponse.text().catch(() => '')
-        throw new Error(errorText || 'Falha ao conectar com o Realtime da OpenAI')
-      }
-
-      await peerConnection.setRemoteDescription({
-        type: 'answer',
-        sdp: await sdpResponse.text(),
-      })
-
-      await waitForDataChannelOpen(dataChannel)
-
       recorder.start()
-      peerConnectionRef.current = peerConnection
-      dataChannelRef.current = dataChannel
 
-      commitTimerRef.current = setInterval(() => {
-        sendRealtimeEvent({ type: 'input_audio_buffer.commit' })
-      }, commitIntervalMs)
+      try {
+        // O segredo é temporário e vem do backend; a chave permanente da
+        // OpenAI nunca é exposta ao navegador.
+        const { value: ephemeralKey } = await api.consultations.createRealtimeToken(consultationId)
 
-      setState('recording')
+        const peerConnection = new RTCPeerConnection()
+        peerConnectionRef.current = peerConnection
+        peerConnection.onconnectionstatechange = () => {
+          if (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'disconnected') {
+            switchToLocalFallback('A conexão em tempo real caiu. O áudio continua sendo gravado localmente.')
+          }
+        }
+
+        stream.getAudioTracks().forEach((track) => {
+          peerConnection.addTrack(track, stream)
+        })
+
+        // O data channel recebe deltas parciais e eventos completos da
+        // transcrição sem precisar esperar o fim da consulta.
+        const dataChannel = peerConnection.createDataChannel('oai-events')
+        dataChannelRef.current = dataChannel
+        dataChannel.addEventListener('message', handleRealtimeMessage)
+
+        const offer = await peerConnection.createOffer()
+        if (!offer.sdp) throw new Error('Não foi possível preparar a conexão em tempo real')
+        await peerConnection.setLocalDescription(offer)
+
+        const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+          method: 'POST',
+          body: offer.sdp,
+          headers: { Authorization: `Bearer ${ephemeralKey}`, 'Content-Type': 'application/sdp' },
+        })
+
+        if (!sdpResponse.ok) throw new Error('O serviço de transcrição em tempo real não respondeu')
+
+        await peerConnection.setRemoteDescription({ type: 'answer', sdp: await sdpResponse.text() })
+        await waitForDataChannelOpen(dataChannel)
+
+        modeRef.current = 'realtime'
+        setMode('realtime')
+
+        commitTimerRef.current = setInterval(() => {
+          sendRealtimeEvent({ type: 'input_audio_buffer.commit' })
+        }, commitIntervalMs)
+
+        setState('recording')
+      } catch (realtimeError) {
+        switchToLocalFallback(
+          realtimeError instanceof Error
+            ? `${realtimeError.message}. O áudio continua sendo gravado localmente.`
+            : 'Realtime indisponível. O áudio continua sendo gravado localmente.'
+        )
+      }
     } catch (error) {
       cleanupRealtimeResources()
       const maybeRecorder = recorderRef.current
@@ -283,6 +312,8 @@ export function useRealtimeTranscription({
         maybeRecorder.stop()
       }
       setState('idle')
+      setMode('none')
+      modeRef.current = 'none'
       throw error
     } finally {
       isStartingRef.current = false
@@ -294,6 +325,7 @@ export function useRealtimeTranscription({
     handleRealtimeMessage,
     sendRealtimeEvent,
     state,
+    switchToLocalFallback,
     waitForDataChannelOpen,
   ])
 
@@ -301,14 +333,19 @@ export function useRealtimeTranscription({
     if (state !== 'recording') return
 
     setState('processing')
+    const completedMode = modeRef.current === 'local' ? 'local' : 'realtime'
 
     if (commitTimerRef.current) {
       clearInterval(commitTimerRef.current)
       commitTimerRef.current = null
     }
 
-    sendRealtimeEvent({ type: 'input_audio_buffer.commit' })
-    await waitForPendingTranscripts(1600)
+    if (completedMode === 'realtime') {
+      // Dá uma última confirmação ao Realtime e aguarda os eventos finais
+      // antes de fechar a conexão, evitando perder as últimas palavras.
+      sendRealtimeEvent({ type: 'input_audio_buffer.commit' })
+      await waitForPendingTranscripts(1600)
+    }
 
     const fullBlob = await stopLocalRecorder()
     cleanupRealtimeResources()
@@ -317,10 +354,12 @@ export function useRealtimeTranscription({
 
     try {
       if (onStop && fullBlob) {
-        await onStop(fullBlob)
+        await onStop(fullBlob, { mode: completedMode })
       }
     } finally {
       setState('idle')
+      setMode('none')
+      modeRef.current = 'none'
     }
   }, [
     cleanupRealtimeResources,
@@ -332,17 +371,20 @@ export function useRealtimeTranscription({
   ])
 
   useEffect(() => {
+    const partialItems = partialItemsRef.current
     return () => {
       void stopLocalRecorder()
       cleanupRealtimeResources()
       recorderRef.current = null
-      partialItemsRef.current.clear()
+      partialItems.clear()
     }
   }, [cleanupRealtimeResources, stopLocalRecorder])
 
   return {
     state,
     liveTranscript,
+    mode,
+    connectionError,
     startRecording,
     stopRecording,
   }
