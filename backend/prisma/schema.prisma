@@ -8,17 +8,22 @@ datasource db {
 }
 
 model User {
-  id            String   @id @default(cuid())
-  email         String   @unique
-  passwordHash  String
-  name          String
-  suggestedName String
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                        String   @id @default(cuid())
+  email                     String   @unique
+  passwordHash              String
+  name                      String
+  suggestedName             String
+  suppressFormChangeWarning Boolean  @default(false)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
 
-  patients      Patient[]
-  consultations Consultation[]
-  schedules     Schedule[]
+  patients                Patient[]
+  consultations           Consultation[]
+  schedules               Schedule[]
+  formTemplates           ClinicalFormTemplate[]
+  formDefaults            ClinicalFormDefault[]
+  audioRetentionPolicy    AudioRetentionPolicy?
+  retentionDeletionEvents RetentionDeletionEvent[]
 }
 
 model Schedule {
@@ -26,6 +31,8 @@ model Schedule {
   userId                     String
   title                      String
   specialty                  String
+  specialtyCode              String?
+  formTemplateId             String?
   status                     String   @default("ativa")
   activeWeekDaysJson         String   @default("[1,2,3,4,5]")
   workOnHolidays             Boolean  @default(false)
@@ -34,11 +41,89 @@ model Schedule {
   createdAt                  DateTime @default(now())
   updatedAt                  DateTime @updatedAt
 
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  consultations Consultation[]
+  user             User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialtyProfile SpecialtyProfile?     @relation(fields: [specialtyCode], references: [code], onDelete: SetNull, onUpdate: Cascade)
+  formTemplate     ClinicalFormTemplate? @relation(fields: [formTemplateId], references: [id], onDelete: SetNull)
+  consultations    Consultation[]
 
   @@index([userId, status])
   @@index([userId, specialty])
+  @@index([specialtyCode])
+  @@index([formTemplateId])
+}
+
+// Perfil canônico de uma especialidade habilitada no motor dinâmico.
+model SpecialtyProfile {
+  id                  String   @id @default(cuid())
+  code                String   @unique
+  name                String
+  description         String?
+  dynamicFormsEnabled Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  templates     ClinicalFormTemplate[]
+  defaults      ClinicalFormDefault[]
+  schedules     Schedule[]
+  consultations Consultation[]
+}
+
+// Rascunho editável. Publicações são snapshots imutáveis em ClinicalFormTemplateVersion.
+model ClinicalFormTemplate {
+  id                  String    @id @default(cuid())
+  userId              String
+  specialtyCode       String
+  name                String
+  description         String?
+  status              String    @default("rascunho")
+  origin              String    @default("usuario")
+  sourceTemplateKey   String?
+  draftDefinitionJson String
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  archivedAt          DateTime?
+
+  user      User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialty SpecialtyProfile              @relation(fields: [specialtyCode], references: [code], onDelete: Restrict, onUpdate: Cascade)
+  versions  ClinicalFormTemplateVersion[]
+  defaults  ClinicalFormDefault[]
+  schedules Schedule[]
+
+  @@unique([userId, sourceTemplateKey])
+  @@index([userId, specialtyCode, status])
+}
+
+model ClinicalFormTemplateVersion {
+  id                  String   @id @default(cuid())
+  templateId          String
+  version             Int
+  definitionJson      String
+  runtimeManifestJson String
+  checksum            String
+  publishedAt         DateTime @default(now())
+  createdAt           DateTime @default(now())
+
+  template      ClinicalFormTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  consultations Consultation[]
+
+  @@unique([templateId, version])
+  @@index([templateId, publishedAt])
+}
+
+model ClinicalFormDefault {
+  id            String   @id @default(cuid())
+  userId        String
+  specialtyCode String
+  templateId    String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  specialty SpecialtyProfile     @relation(fields: [specialtyCode], references: [code], onDelete: Cascade, onUpdate: Cascade)
+  template  ClinicalFormTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, specialtyCode])
+  @@index([templateId])
 }
 
 model LegacyScheduleSettings {
@@ -90,16 +175,24 @@ model Patient {
 }
 
 model Consultation {
-  id         String @id @default(cuid())
-  userId     String?
-  patientId  String
-  scheduleId String?
+  id                     String    @id @default(cuid())
+  userId                 String?
+  patientId              String
+  scheduleId             String?
+  specialtyCode          String?
+  formMode               String    @default("legacy")
+  formTemplateVersionId  String?
+  formDefinitionSnapshot String?
+  formPinnedAt           DateTime?
 
   // Audio and transcript storage
-  audioPath           String?
-  transcript          String?
+  audioPath            String?
+  audioSavedAt         DateTime?
+  audioDeleteAt        DateTime?
+  audioEncrypted       Boolean   @default(false)
+  transcript           String?
   transcriptStructured String?
-  specialtyData       String?
+  specialtyData        String?
 
   // Anamnese
   chiefComplaint   String?
@@ -164,22 +257,278 @@ model Consultation {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  user               User?                         @relation(fields: [userId], references: [id], onDelete: SetNull)
-  patient            Patient                       @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  schedule           Schedule?                     @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
-  versions           ConsultationVersion[]
-  transcriptSegments ConsultationTranscriptSegment[]
-  aiState            ConsultationAiState?
-  appointmentEvents  ConsultationAppointmentEvent[]
+  user                    User?                           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  patient                 Patient                         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  schedule                Schedule?                       @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  specialtyProfile        SpecialtyProfile?               @relation(fields: [specialtyCode], references: [code], onDelete: SetNull, onUpdate: Cascade)
+  formTemplateVersion     ClinicalFormTemplateVersion?    @relation(fields: [formTemplateVersionId], references: [id], onDelete: SetNull)
+  versions                ConsultationVersion[]
+  transcriptSegments      ConsultationTranscriptSegment[]
+  aiState                 ConsultationAiState?
+  appointmentEvents       ConsultationAppointmentEvent[]
+  documents               ConsultationDocument[]
+  fieldValues             ConsultationFieldValue[]
+  fieldEvents             ConsultationFieldEvent[]
+  participants            ConsultationParticipant[]
+  participantEvents       ConsultationParticipantEvent[]
+  consents                ConsultationConsent[]
+  quarantineItems         ConsultationQuarantineItem[]
+  generatedDocuments      GeneratedClinicalDocument[]
+  medicationReferences    MedicationReferenceRecord[]
+  retentionDeletionEvents RetentionDeletionEvent[]
 
   @@index([userId, scheduledAt])
   @@index([userId, status])
   @@index([scheduleId, scheduledAt])
   @@index([patientId])
+  @@index([specialtyCode])
+  @@index([formTemplateVersionId])
+}
+
+model ConsultationDocument {
+  id             String    @id @default(cuid())
+  consultationId String
+  kind           String
+  title          String
+  status         String    @default("rascunho")
+  contentJson    String    @default("{}")
+  revision       Int       @default(1)
+  deleteAt       DateTime?
+  legalHold      Boolean   @default(false)
+  deletedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  consultation Consultation             @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  fieldValues  ConsultationFieldValue[]
+
+  @@unique([consultationId, kind])
+  @@index([consultationId, status])
+}
+
+model ConsultationFieldValue {
+  id             String   @id @default(cuid())
+  consultationId String
+  documentId     String
+  fieldId        String
+  valueJson      String
+  source         String   @default("manual")
+  reviewStatus   String   @default("confirmado")
+  evidenceJson   String?
+  revision       Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  consultation Consultation             @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  document     ConsultationDocument     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  events       ConsultationFieldEvent[]
+
+  @@unique([documentId, fieldId])
+  @@index([consultationId, fieldId])
+}
+
+// Histórico imutável de toda alteração em um valor dinâmico.
+model ConsultationFieldEvent {
+  id                String   @id @default(cuid())
+  consultationId    String
+  fieldValueId      String?
+  documentKind      String
+  fieldId           String
+  operation         String
+  previousValueJson String?
+  nextValueJson     String?
+  actorType         String
+  actorUserId       String?
+  metadataJson      String?
+  createdAt         DateTime @default(now())
+
+  consultation Consultation            @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  fieldValue   ConsultationFieldValue? @relation(fields: [fieldValueId], references: [id], onDelete: SetNull)
+
+  @@index([consultationId, createdAt])
+  @@index([fieldValueId])
+}
+
+model ConsultationParticipant {
+  id             String    @id @default(cuid())
+  consultationId String
+  coreKey        String?
+  name           String
+  role           String
+  speakerLabel   String?
+  authorized     Boolean   @default(false)
+  authorizedAt   DateTime?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  consultation Consultation          @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  consents     ConsultationConsent[]
+
+  @@unique([consultationId, coreKey])
+  @@unique([consultationId, speakerLabel])
+  @@index([consultationId, active])
+}
+
+// Historico imutavel de cadastro, associacao de voz e mudancas de participante.
+model ConsultationParticipantEvent {
+  id             String   @id @default(cuid())
+  consultationId String
+  participantId  String?
+  operation      String
+  previousJson   String?
+  nextJson       String?
+  actorUserId    String?
+  createdAt      DateTime @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId, createdAt])
+  @@index([participantId])
+}
+
+model ConsultationConsent {
+  id             String    @id @default(cuid())
+  consultationId String
+  participantId  String?
+  type           String
+  granted        Boolean
+  termsVersion   String
+  evidenceJson   String?
+  recordedAt     DateTime  @default(now())
+  revokedAt      DateTime?
+
+  consultation Consultation             @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  participant  ConsultationParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+
+  @@index([consultationId, type, recordedAt])
+  @@index([participantId])
+}
+
+model ConsultationQuarantineItem {
+  id             String    @id @default(cuid())
+  consultationId String
+  kind           String
+  reason         String
+  status         String    @default("pendente")
+  sourceText     String?
+  payloadJson    String?
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId, status, createdAt])
+}
+
+model GeneratedClinicalDocument {
+  id               String    @id @default(cuid())
+  consultationId   String
+  format           String
+  documentKind     String
+  status           String    @default("rascunho")
+  source           String    @default("ia")
+  createdBy        String?
+  contentJson      String
+  sourceSnapshot   String?
+  parentDocumentId String?
+  amendmentReason  String?
+  reviewedAt       DateTime?
+  reviewedBy       String?
+  deleteAt         DateTime?
+  legalHold        Boolean   @default(false)
+  deletedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId, format, documentKind])
+}
+
+model AudioRetentionPolicy {
+  id                             String   @id @default(cuid())
+  userId                         String   @unique
+  audioRetentionDays             Int      @default(1825)
+  sharedRecordRetentionYears     Int      @default(20)
+  restrictedRecordRetentionYears Int      @default(5)
+  legalHold                      Boolean  @default(false)
+  createdAt                      DateTime @default(now())
+  updatedAt                      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model MedicationReferenceRecord {
+  id             String    @id @default(cuid())
+  consultationId String
+  searchedName   String
+  normalizedName String?
+  sourceTitle    String?
+  sourceUrl      String?
+  contentJson    String
+  status         String    @default("pendente")
+  consultedAt    DateTime  @default(now())
+  reviewedAt     DateTime?
+  reviewedBy     String?
+  createdAt      DateTime  @default(now())
+
+  consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+
+  @@index([consultationId, status, consultedAt])
+}
+
+// Trilha imutavel das exclusoes executadas pelo motor de retencao.
+model RetentionDeletionEvent {
+  id             String   @id @default(cuid())
+  userId         String
+  consultationId String?
+  dataClass      String
+  targetHash     String
+  reason         String
+  metadataJson   String?
+  deletedAt      DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consultation Consultation? @relation(fields: [consultationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, deletedAt])
+  @@index([consultationId, dataClass])
+}
+
+// Auditoria sem conteudo clinico de toda leitura de dados sensiveis.
+model AccessAuditEvent {
+  id             String   @id @default(cuid())
+  actorUserId    String
+  consultationId String?
+  dataClass      String
+  action         String
+  requestId      String?
+  createdAt      DateTime @default(now())
+
+  @@index([actorUserId, createdAt])
+  @@index([consultationId, dataClass, createdAt])
+}
+
+// Fila duravel para exclusao fisica de audio fora da transacao do banco.
+model PendingAudioDeletion {
+  id             String   @id @default(cuid())
+  filePath       String   @unique
+  userId         String?
+  consultationId String?
+  dataClass      String   @default("audio_consulta")
+  reason         String
+  attempts       Int      @default(0)
+  lastError      String?
+  nextAttemptAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@index([nextAttemptAt, attempts])
 }
 
 model ConsultationAppointmentEvent {
-  id                  String   @id @default(cuid())
+  id                  String    @id @default(cuid())
   consultationId      String
   operation           String
   previousScheduledAt DateTime?
@@ -187,7 +536,7 @@ model ConsultationAppointmentEvent {
   previousStatus      String?
   status              String
   reason              String?
-  createdAt           DateTime @default(now())
+  createdAt           DateTime  @default(now())
 
   consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
@@ -197,19 +546,19 @@ model ConsultationAppointmentEvent {
 // Estado operacional da IA. Os dados clinicos continuam no model Consultation;
 // aqui ficam somente cursor, proveniencia e sugestoes auditaveis.
 model ConsultationAiState {
-  id                        String   @id @default(cuid())
-  consultationId            String   @unique
-  templateId                String   @default("clinica_geral")
-  lastProcessedSequence     Int      @default(0)
+  id                        String    @id @default(cuid())
+  consultationId            String    @unique
+  templateId                String    @default("clinica_geral")
+  lastProcessedSequence     Int       @default(0)
   processingThroughSequence Int?
   processingStartedAt       DateTime?
-  fieldMetaJson             String   @default("{}")
-  suggestionsJson           String   @default("[]")
-  promptVersion             String   @default("clinical-delta-v1")
-  schemaVersion             String   @default("clinical-schema-v1")
+  fieldMetaJson             String    @default("{}")
+  suggestionsJson           String    @default("[]")
+  promptVersion             String    @default("clinical-delta-v1")
+  schemaVersion             String    @default("clinical-schema-v1")
   finalReviewAt             DateTime?
-  createdAt                 DateTime @default(now())
-  updatedAt                 DateTime @updatedAt
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
@@ -230,6 +579,7 @@ model ConsultationTranscriptSegment {
   consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
   @@unique([consultationId, itemId])
+  @@unique([consultationId, sequence])
   @@index([consultationId, sequence])
   @@index([consultationId, createdAt])
 }
@@ -247,5 +597,5 @@ model ConsultationVersion {
 
   consultation Consultation @relation(fields: [consultationId], references: [id], onDelete: Cascade)
 
-  @@index([consultationId])
+  @@unique([consultationId, version])
 }

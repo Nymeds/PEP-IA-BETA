@@ -49,6 +49,12 @@ export function useRealtimeTranscription({
   const partialItemsRef = useRef(new Map<string, string>())
   const pendingPersistsRef = useRef(new Set<Promise<void>>())
   const modeRef = useRef<TranscriptionMode>('none')
+  const sessionAbortRef = useRef<AbortController | null>(null)
+  const onStopRef = useRef(onStop)
+
+  useEffect(() => {
+    onStopRef.current = onStop
+  }, [onStop])
 
   // O áudio local é mantido mesmo quando o Realtime está funcionando.
   // Ele serve como cópia completa para auditoria e como fallback caso a
@@ -100,7 +106,6 @@ export function useRealtimeTranscription({
   const switchToLocalFallback = useCallback((message: string) => {
     // O fallback não envia chunks continuamente: o áudio inteiro é enviado
     // ao parar a gravação, em ConsultationView.handleStop.
-    if (modeRef.current === 'local') return
     cleanupRealtimeConnection()
     modeRef.current = 'local'
     setMode('local')
@@ -221,6 +226,9 @@ export function useRealtimeTranscription({
     if (state !== 'idle' || isStartingRef.current) return
 
     isStartingRef.current = true
+    const sessionController = new AbortController()
+    sessionAbortRef.current?.abort()
+    sessionAbortRef.current = sessionController
     audioChunksRef.current = []
     partialItemsRef.current.clear()
     setLiveTranscript('')
@@ -237,6 +245,10 @@ export function useRealtimeTranscription({
           sampleRate: 24000,
         },
       })
+      if (sessionController.signal.aborted) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
       streamRef.current = stream
 
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -250,11 +262,15 @@ export function useRealtimeTranscription({
       }
       recorderRef.current = recorder
       recorder.start()
+      modeRef.current = 'local'
+      setMode('local')
+      setState('recording')
 
       try {
         // O segredo é temporário e vem do backend; a chave permanente da
         // OpenAI nunca é exposta ao navegador.
         const { value: ephemeralKey } = await api.consultations.createRealtimeToken(consultationId)
+        if (sessionController.signal.aborted || !recorderRef.current) return
 
         const peerConnection = new RTCPeerConnection()
         peerConnectionRef.current = peerConnection
@@ -278,13 +294,21 @@ export function useRealtimeTranscription({
         if (!offer.sdp) throw new Error('Não foi possível preparar a conexão em tempo real')
         await peerConnection.setLocalDescription(offer)
 
-        const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
-          method: 'POST',
-          body: offer.sdp,
-          headers: { Authorization: `Bearer ${ephemeralKey}`, 'Content-Type': 'application/sdp' },
-        })
+        const connectionTimeout = window.setTimeout(() => sessionController.abort(), 15_000)
+        let sdpResponse: Response
+        try {
+          sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+            method: 'POST',
+            body: offer.sdp,
+            headers: { Authorization: `Bearer ${ephemeralKey}`, 'Content-Type': 'application/sdp' },
+            signal: sessionController.signal,
+          })
+        } finally {
+          window.clearTimeout(connectionTimeout)
+        }
 
         if (!sdpResponse.ok) throw new Error('O serviço de transcrição em tempo real não respondeu')
+        if (sessionController.signal.aborted || !recorderRef.current) return
 
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: await sdpResponse.text() })
         await waitForDataChannelOpen(dataChannel)
@@ -298,6 +322,7 @@ export function useRealtimeTranscription({
 
         setState('recording')
       } catch (realtimeError) {
+        if (sessionController.signal.aborted && !recorderRef.current) return
         switchToLocalFallback(
           realtimeError instanceof Error
             ? `${realtimeError.message}. O áudio continua sendo gravado localmente.`
@@ -333,6 +358,8 @@ export function useRealtimeTranscription({
     if (state !== 'recording') return
 
     setState('processing')
+    sessionAbortRef.current?.abort()
+    sessionAbortRef.current = null
     const completedMode = modeRef.current === 'local' ? 'local' : 'realtime'
 
     if (commitTimerRef.current) {
@@ -353,8 +380,8 @@ export function useRealtimeTranscription({
     setLiveTranscript('')
 
     try {
-      if (onStop && fullBlob) {
-        await onStop(fullBlob, { mode: completedMode })
+      if (onStopRef.current && fullBlob) {
+        await onStopRef.current(fullBlob, { mode: completedMode })
       }
     } finally {
       setState('idle')
@@ -363,7 +390,6 @@ export function useRealtimeTranscription({
     }
   }, [
     cleanupRealtimeResources,
-    onStop,
     sendRealtimeEvent,
     state,
     stopLocalRecorder,
@@ -373,10 +399,19 @@ export function useRealtimeTranscription({
   useEffect(() => {
     const partialItems = partialItemsRef.current
     return () => {
-      void stopLocalRecorder()
-      cleanupRealtimeResources()
-      recorderRef.current = null
-      partialItems.clear()
+      sessionAbortRef.current?.abort()
+      sessionAbortRef.current = null
+      const completedMode = modeRef.current === 'realtime' ? 'realtime' : 'local'
+      void (async () => {
+        const fullBlob = await stopLocalRecorder()
+        cleanupRealtimeResources()
+        partialItems.clear()
+        if (onStopRef.current && fullBlob) {
+          await onStopRef.current(fullBlob, { mode: completedMode }).catch((error) => {
+            console.error('Erro ao preservar audio ao sair da consulta:', error)
+          })
+        }
+      })()
     }
   }, [cleanupRealtimeResources, stopLocalRecorder])
 

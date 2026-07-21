@@ -1,9 +1,14 @@
 'use client'
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
+import { useQueryClient } from '@tanstack/react-query'
 import { AuthUser } from '@/types'
 import { ApiError, api } from '@/services/api'
+import {
+  clearClinicalSessionStorage,
+  SESSION_EXPIRED_EVENT,
+} from '@/services/client-session'
 
 interface SessionContextValue {
   user: AuthUser | null
@@ -36,14 +41,30 @@ function FullscreenState({ message }: { message: string }) {
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
+  const queryClient = useQueryClient()
   const [user, setUser] = useState<AuthUser | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const activeUserIdRef = useRef<string | null | undefined>(undefined)
+
+  const clearPrivateClientState = useCallback(() => {
+    queryClient.clear()
+    clearClinicalSessionStorage()
+  }, [queryClient])
+
+  const applySessionUser = useCallback((nextUser: AuthUser | null) => {
+    const nextUserId = nextUser?.id ?? null
+    if (activeUserIdRef.current !== nextUserId) {
+      clearPrivateClientState()
+    }
+    activeUserIdRef.current = nextUserId
+    setUser(nextUser)
+  }, [clearPrivateClientState])
 
   const refreshSession = useCallback(async () => {
     setIsLoading(true)
     try {
       const response = await api.auth.me()
-      setUser(response.user)
+      applySessionUser(response.user)
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 404)) {
         if (error.status === 404) {
@@ -54,11 +75,24 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       } else {
         console.error('Falha ao carregar sessao:', error)
       }
-      setUser(null)
+      applySessionUser(null)
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [applySessionUser])
+
+  useEffect(() => {
+    const expireSession = () => {
+      clearPrivateClientState()
+      activeUserIdRef.current = null
+      setUser(null)
+      setIsLoading(false)
+      router.replace('/login')
+    }
+
+    window.addEventListener(SESSION_EXPIRED_EVENT, expireSession)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expireSession)
+  }, [clearPrivateClientState, router])
 
   useEffect(() => {
     void refreshSession()
@@ -84,10 +118,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     } catch (error) {
       console.error('Falha ao encerrar sessao:', error)
     } finally {
+      clearPrivateClientState()
+      activeUserIdRef.current = null
       setUser(null)
       router.replace('/login')
     }
-  }, [router])
+  }, [clearPrivateClientState, router])
 
   const value = useMemo<SessionContextValue>(
     () => ({
@@ -95,10 +131,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       isLoading,
       isAuthenticated: Boolean(user),
       refreshSession,
-      setSessionUser: setUser,
+      setSessionUser: applySessionUser,
       logout,
     }),
-    [isLoading, logout, refreshSession, user]
+    [applySessionUser, isLoading, logout, refreshSession, user]
   )
 
   const publicRoute = isPublicPath(pathname)

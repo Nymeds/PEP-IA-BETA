@@ -2,6 +2,8 @@ import { FastifyReply, FastifyRequest } from 'fastify'
 import { Prisma } from '@prisma/client'
 import { getPrisma } from '../lib/prisma'
 import { summarizePatient } from '../services/analysis.service'
+import { summarizeDynamicLongitudinalRecord } from '../services/dynamic-longitudinal-summary.service'
+import { parseFormDefinition } from '../services/clinical-forms.service'
 
 interface PatientsListQuery {
   search?: string
@@ -42,6 +44,50 @@ interface PatientBody {
   chronicDiseases?: string | null
   notes?: string | null
   quickCreated?: boolean
+}
+
+const PATIENT_WRITABLE_FIELDS = [
+  'name',
+  'socialName',
+  'cpf',
+  'rg',
+  'birthDate',
+  'sex',
+  'maritalStatus',
+  'phone',
+  'whatsapp',
+  'email',
+  'cep',
+  'address',
+  'addressNumber',
+  'neighborhood',
+  'city',
+  'state',
+  'emergencyContact',
+  'emergencyPhone',
+  'bloodType',
+  'allergies',
+  'chronicDiseases',
+  'notes',
+  'quickCreated',
+] as const
+
+function pickPatientBody(input: unknown): PatientBody {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {}
+  const source = input as Record<string, unknown>
+  const result: PatientBody = {}
+  for (const field of PATIENT_WRITABLE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(source, field)) continue
+    const value = source[field]
+    if (field === 'quickCreated') {
+      if (typeof value === 'boolean') result.quickCreated = value
+      continue
+    }
+    if (value === null || (typeof value === 'string' && value.length <= 20_000)) {
+      result[field] = value as never
+    }
+  }
+  return result
 }
 
 async function findPatientByOwner(id: string, userId: string) {
@@ -148,6 +194,78 @@ export async function findPatientDuplicates(
   return reply.send({ matches: patients })
 }
 
+async function buildDynamicLongitudinalRecords(patientId: string, userId: string) {
+  const dynamicConsultations = await getPrisma().consultation.findMany({
+    where: {
+      patientId,
+      userId,
+      formMode: 'dynamic',
+      status: 'finalizado',
+    },
+    orderBy: [{ scheduledAt: 'asc' }, { createdAt: 'asc' }],
+    include: {
+      formTemplateVersion: true,
+      consents: {
+        where: { type: 'transcricao_ia' },
+        orderBy: { recordedAt: 'desc' },
+      },
+      documents: {
+        where: { kind: 'compartilhavel', deletedAt: null },
+        include: { fieldValues: true },
+      },
+    },
+  })
+
+  const dynamicRecords = dynamicConsultations.flatMap((consultation) => {
+    if (!consultation.consents[0]?.granted) return []
+    let labels = new Map<string, string>()
+    let allowedFieldIds = new Set<string>()
+    try {
+      const definition = parseFormDefinition(
+        consultation.formDefinitionSnapshot || consultation.formTemplateVersion?.definitionJson || ''
+      )
+      const sharedFields = definition.documents
+        .filter((document) => document.kind === 'compartilhavel')
+        .flatMap((document) => document.tabs.flatMap((tab) =>
+          tab.elements
+            .filter((field) => field.type !== 'titulo' && field.type !== 'divisor')
+            .map((field) => [field.id, field.label] as const)
+        ))
+      labels = new Map(sharedFields)
+      allowedFieldIds = new Set(sharedFields.map(([fieldId]) => fieldId))
+    } catch {
+      // Uma versao antiga invalida nao deve derrubar o resumo das demais sessoes.
+    }
+    const sharedFields = consultation.documents.flatMap((document) =>
+      document.fieldValues.flatMap((field) => {
+        if (!allowedFieldIds.has(field.fieldId)) return []
+        if (field.source === 'ia' && field.reviewStatus !== 'confirmado') return []
+        let value: unknown
+        try {
+          value = JSON.parse(field.valueJson) as unknown
+        } catch {
+          return []
+        }
+        return [{
+          id: field.fieldId,
+          label: labels.get(field.fieldId) || field.fieldId,
+          value,
+          source: field.source,
+          reviewStatus: field.reviewStatus,
+        }]
+      })
+    )
+    if (!sharedFields.length) return []
+    return [{
+      date: new Date(consultation.scheduledAt || consultation.createdAt).toLocaleDateString('pt-BR'),
+      source: 'dynamic' as const,
+      templateVersionId: consultation.formTemplateVersionId,
+      sharedFields,
+    }]
+  })
+  return dynamicRecords
+}
+
 export async function getPatient(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
@@ -161,7 +279,7 @@ export async function createPatient(
   req: FastifyRequest<{ Body: PatientBody }>,
   reply: FastifyReply
 ) {
-  const body = req.body || {}
+  const body = pickPatientBody(req.body)
   if (!body.name?.trim()) {
     return reply.status(400).send({ error: 'Nome do paciente e obrigatorio' })
   }
@@ -203,7 +321,11 @@ export async function updatePatient(
 
   if (!existing) return reply.status(404).send({ error: 'Paciente nao encontrado' })
 
-  const body = req.body || {}
+  const body = pickPatientBody(req.body)
+  if (body.name !== undefined && !body.name?.trim()) {
+    return reply.status(400).send({ error: 'Nome do paciente e obrigatorio' })
+  }
+  if (body.name) body.name = body.name.trim()
 
   const patient = await getPrisma().patient.update({
     where: { id: existing.id },
@@ -224,6 +346,27 @@ export async function deletePatient(
 
   if (!existing) return reply.status(404).send({ error: 'Paciente nao encontrado' })
 
+  const retainedDynamicDocuments = await getPrisma().consultationDocument.count({
+    where: {
+      consultation: {
+        patientId: existing.id,
+        userId: req.authUser!.id,
+        formMode: 'dynamic',
+      },
+      deletedAt: null,
+      OR: [
+        { legalHold: true },
+        { deleteAt: null },
+        { deleteAt: { gt: new Date() } },
+      ],
+    },
+  })
+  if (retainedDynamicDocuments > 0) {
+    return reply.status(409).send({
+      error: 'O paciente possui documentos dinamicos dentro do prazo de retencao e nao pode ser excluido',
+    })
+  }
+
   await getPrisma().patient.delete({ where: { id: existing.id } })
   return reply.status(204).send()
 }
@@ -235,8 +378,10 @@ export async function getPatientSummary(
 ) {
   const patient = await findPatientByOwner(req.params.id, req.authUser!.id)
   if (!patient) return reply.status(404).send({ error: 'Paciente nao encontrado' })
+  const dynamicRecords = await buildDynamicLongitudinalRecords(patient.id, req.authUser!.id)
 
   const relevant = patient.consultations.filter((consultation) => {
+    if (consultation.formMode === 'dynamic') return false
     return (
       consultation.transcript ||
       consultation.chiefComplaint ||
@@ -245,8 +390,39 @@ export async function getPatientSummary(
     )
   })
 
-  if (!relevant.length) {
+  if (!relevant.length && !dynamicRecords.length) {
     return reply.send({ summary: null, message: 'Sem atendimentos com conteudo para resumir' })
+  }
+
+  if (dynamicRecords.length) {
+    const legacyRecords = relevant.map((consultation) => ({
+      date: new Date(consultation.scheduledAt || consultation.createdAt).toLocaleDateString('pt-BR'),
+      source: 'legacy' as const,
+      templateVersionId: null,
+      sharedFields: [
+        ['chiefComplaint', 'Queixa principal', consultation.chiefComplaint],
+        ['assessment', 'Avaliacao', consultation.assessment],
+        ['plan', 'Plano', consultation.plan],
+        ['currentMedications', 'Medicamentos relatados', consultation.currentMedications],
+        ['allergiesDetails', 'Alergias relatadas', consultation.allergiesDetails],
+      ].flatMap(([id, label, value]) => value ? [{
+        id: String(id),
+        label: String(label),
+        value,
+        source: 'legacy',
+        reviewStatus: 'legado',
+      }] : []),
+    }))
+    const summary = await summarizeDynamicLongitudinalRecord({
+      ownerId: req.authUser!.id,
+      records: [...legacyRecords, ...dynamicRecords],
+    })
+    return reply.send({
+      summary,
+      consultationCount: relevant.length + dynamicRecords.length,
+      formMode: 'dynamic',
+      sharedDocumentOnly: true,
+    })
   }
 
   const summary = await summarizePatient({

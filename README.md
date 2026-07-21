@@ -1,222 +1,113 @@
-# PEP IA — Prontuário Eletrônico com Inteligência Artificial
+# PEP IA — prontuário eletrônico assistido por IA
 
-Sistema de prontuário eletrônico que usa IA para transcrever consultas médicas em tempo real e preencher automaticamente os campos do prontuário.
+Beta experimental em português do Brasil. O sistema mantém o prontuário fixo
+original como motor `legacy` e habilita, sob feature flag, um motor dinâmico para
+Psicologia.
 
----
+> Não homologado para uso clínico real. Use somente dados fictícios ou um piloto
+> controlado até concluir revisão jurídica, RIPD, validação profissional e política
+> de fornecedores.
 
-## Como funciona
+## O que está disponível
 
-1. O médico clica em **Iniciar Sessão** (botão de microfone na parte inferior da tela)
-2. A conversa é gravada e enviada para transcrição a cada 8 segundos
-3. A IA transcreve a fala e extrai informações clínicas automaticamente
-4. Os campos do prontuário são preenchidos em tempo real enquanto a consulta acontece
-5. As abas avançam sozinhas conforme o assunto muda (anamnese → antecedentes → exame físico etc.)
-6. Ao encerrar, o médico clica em **Gerar SOAP** para criar a evolução clínica completa
-7. Revisão e salvamento final
+- autenticação e isolamento dos dados por profissional;
+- agenda mensal, semanal e linha do tempo diária;
+- prontuário legado preservado para consultas existentes e outras especialidades;
+- **Meu formulário** (`/formularios`) com rascunho, cópia, versão imutável,
+  publicação, formulário padrão, arquivamento e histórico;
+- editor visual com canvas livre no desktop, grade de 8 px, prevenção de
+  sobreposição, redimensionamento, desfazer/refazer, teclado e reflow mobile;
+- preset de Psicologia com prontuário compartilhável e registro psicológico
+  restrito, incluindo Familiares e rede e Medicamentos;
+- pinagem da versão ao agendar e troca auditada somente antes do início;
+- campos e abas renderizados pelo schema publicado, com autosave otimista;
+- consentimentos separados de áudio, transcrição/IA e participantes;
+- evidência literal por campo, identificação de vozes, quarentena e revisão humana;
+- evolução em SOAP, DAP ou BIRP, inclusive fluxo totalmente manual;
+- exportações separadas e retenção por classe documental;
+- criptografia de áudio e conteúdo restrito em repouso em produção.
 
----
+A IA é sempre assistente. Conteúdo crítico, risco, hipóteses, condutas,
+diagnósticos, avaliações psicológicas e referências farmacológicas exigem revisão
+do profissional.
 
-## Pré-requisitos
+## Requisitos
 
-- [Node.js](https://nodejs.org) versão 18 ou superior
-- Chave de API da OpenAI com acesso aos modelos GPT-4.1 e Whisper
+- Node.js 18 ou superior;
+- npm;
+- chave da OpenAI para os recursos de transcrição e IA.
 
----
+## Instalação e execução
 
-## Instalação
-
-### 1. Clone ou baixe o projeto
-
-Certifique-se de estar na pasta `PEP/`.
-
-### 2. Instale as dependências
+Na raiz do monorepo:
 
 ```bash
 npm install
+npm run db:push
+npm run dev
 ```
 
-### 3. Configure o arquivo `.env`
+- frontend: <http://localhost:3001>
+- backend: <http://localhost:3000>
 
-Abra o arquivo `.env` na raiz do projeto e preencha sua chave da OpenAI:
-
-```env
-OPENAI_API_KEY=sk-sua-chave-aqui
-```
-
-Os demais valores já estão configurados para desenvolvimento local e não precisam ser alterados.
-
-### 4. Crie o banco de dados
-
-```bash
-cd backend
-npx prisma db push
-cd ..
-```
-
-Isso cria o arquivo `backend/prisma/dev.db` (SQLite local, sem instalação adicional).
-
----
-
-## Rodando o projeto
-
-Você precisa de **dois terminais** abertos.
-
-### Terminal 1 — Backend
-
-```bash
-cd backend
-npx tsx src/server.ts
-```
-
-Saída esperada:
-```
-🚀 Backend rodando em http://localhost:3000
-```
-
-### Terminal 2 — Frontend
-
-```bash
-cd frontend
-npx next dev -p 3001
-```
-
-Saída esperada:
-```
-▲ Next.js 15.1.3
-- Local: http://localhost:3001
-```
-
-### Acessar o sistema
-
-Abra o navegador em: **http://localhost:3001**
-
----
-
-## Estrutura de pastas
-
-```
-PEP/
-├── .env                          # Variáveis de ambiente (edite aqui)
-├── package.json                  # Raiz do monorepo
-│
-├── backend/
-│   ├── prisma/
-│   │   ├── schema.prisma         # Modelo do banco de dados
-│   │   └── dev.db                # Banco SQLite (criado após db push)
-│   └── src/
-│       ├── server.ts             # Entrada do servidor
-│       ├── routes/               # Rotas HTTP
-│       ├── controllers/          # Lógica das rotas
-│       ├── services/
-│       │   ├── speech.service.ts     # Transcrição de áudio (OpenAI Whisper)
-│       │   ├── extraction.service.ts # Extração de dados clínicos (GPT-4.1)
-│       │   └── soap.service.ts       # Geração do SOAP (GPT-4.1)
-│       └── lib/
-│           └── prisma.ts         # Cliente do banco de dados
-│
-└── frontend/
-    └── src/
-        ├── app/                  # Páginas (Next.js App Router)
-        │   ├── page.tsx              # Dashboard
-        │   ├── patients/             # Lista, cadastro e detalhe de pacientes
-        │   └── consultations/[id]/   # Tela principal da consulta
-        ├── components/
-        │   ├── consultation/
-        │   │   ├── TabSidebar.tsx    # Abas laterais com indicadores de status
-        │   │   ├── RecordingBar.tsx  # Barra inferior com microfone e transcrição
-        │   │   └── tabs/             # Conteúdo de cada aba do prontuário
-        │   └── patients/             # Componentes de paciente
-        ├── hooks/
-        │   ├── useAudioRecorder.ts   # Gravação de áudio em chunks
-        │   └── useConsultation.ts    # Estado da consulta e merge dos dados da IA
-        ├── services/
-        │   └── api.ts            # Chamadas para o backend
-        └── types/
-            └── index.ts          # Tipos TypeScript compartilhados
-```
-
----
-
-## API do Backend
-
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `GET` | `/api/patients` | Listar todos os pacientes |
-| `POST` | `/api/patients` | Cadastrar paciente |
-| `GET` | `/api/patients/:id` | Buscar paciente com histórico |
-| `PUT` | `/api/patients/:id` | Atualizar paciente |
-| `DELETE` | `/api/patients/:id` | Excluir paciente |
-| `POST` | `/api/consultations` | Criar consulta |
-| `GET` | `/api/consultations/:id` | Buscar consulta |
-| `PUT` | `/api/consultations/:id` | Atualizar consulta |
-| `POST` | `/api/consultations/:id/transcribe` | Transcrever chunk de áudio |
-| `POST` | `/api/consultations/:id/audio` | Salvar gravação completa |
-| `POST` | `/api/consultations/:id/finalize` | Gerar SOAP com IA |
-
----
+Também é possível iniciar separadamente com `npm run dev:backend` e
+`npm run dev:frontend`.
 
 ## Variáveis de ambiente
 
-Todas no arquivo `.env` na raiz do projeto:
+Copie `.env.EXAMPLE` para `.env` e revise, no mínimo:
 
-| Variável | Descrição | Padrão |
-|----------|-----------|--------|
-| `OPENAI_API_KEY` | **Obrigatório.** Sua chave da OpenAI | — |
-| `OPENAI_TRANSCRIPTION_MODEL` | Modelo de transcrição | `whisper-1` |
-| `OPENAI_EXTRACTION_MODEL` | Modelo de extração clínica | `gpt-4.1` |
-| `OPENAI_SOAP_MODEL` | Modelo para geração do SOAP | `gpt-4.1` |
-| `PORT` | Porta do backend | `3000` |
-| `FRONTEND_URL` | URL do frontend (para CORS) | `http://localhost:3001` |
-| `DATABASE_URL` | Caminho do banco SQLite. Caminhos `file:` relativos resolvem a partir de `backend/prisma/` | `file:./dev.db` |
-| `NEXT_PUBLIC_API_URL` | URL do backend usada pelo frontend | `http://localhost:3000` |
+| Variável | Uso |
+|---|---|
+| `OPENAI_API_KEY` | Transcrição e assistência clínica |
+| `DYNAMIC_FORMS_PSYCHOLOGY` | Motor dinâmico de Psicologia no backend; use `false` como kill switch |
+| `NEXT_PUBLIC_DYNAMIC_FORMS_PSYCHOLOGY` | Experiência correspondente no frontend; use `false` para ocultar |
+| `DATA_ENCRYPTION_KEY` | Chave de 32 bytes para dados sensíveis; obrigatória em produção |
+| `DATABASE_URL` | SQLite; caminhos relativos são ancorados em `backend/prisma/` |
+| `NEXT_PUBLIC_API_URL` | URL pública do backend, padrão `http://localhost:3000` |
 
-> **Nota:** o filtro de alucinações da transcrição funciona por completo apenas com
-> `whisper-1` (depende do formato `verbose_json`). Com outros modelos sobra apenas o
-> bloqueio por lista de frases conhecidas.
+Consulte [`.env.EXAMPLE`](./.env.EXAMPLE) para modelos, retenção e demais opções.
 
----
+## Arquitetura
 
-## Abas do prontuário
+O repositório é um monorepo npm com:
 
-| Aba | Conteúdo |
-|-----|---------|
-| **Anamnese** | Queixa principal, HDA, início dos sintomas, intensidade, fatores de melhora/piora |
-| **Antecedentes** | Doenças prévias, cirurgias, internações, alergias, medicamentos em uso, história familiar |
-| **Hábitos de Vida** | Tabagismo, etilismo, drogas, atividade física, sono, alimentação, ocupação |
-| **Revisão de Sistemas** | Sintomas por sistema: geral, respiratório, cardiovascular, GI, neurológico, psiquiátrico |
-| **Exame Físico** | Sinais vitais, antropometria, estado geral, exame segmentar |
-| **Diagnóstico** | Hipótese principal, diferenciais, diagnóstico confirmado, CID-10 |
-| **Conduta** | Plano terapêutico, orientações ao paciente, encaminhamentos, data de retorno |
-| **SOAP / Evolução** | Subjetivo, Objetivo, Avaliação, Plano — gerado automaticamente pela IA |
+- `backend/`: Fastify 5, Prisma 6, SQLite e SDK OpenAI;
+- `frontend/`: Next.js 15, React 19, TanStack Query e Tailwind;
+- `backend/src/services/clinical-record-engine.service.ts`: seleção entre
+  `LegacyFixedEngine` e `DynamicFormEngine`;
+- `backend/src/presets/psychology-form.preset.ts`: definição inicial de Psicologia;
+- `frontend/src/components/forms/`: gerenciador e editor de formulários;
+- `frontend/src/components/consultation/dynamic/`: consulta dinâmica e revisão.
 
----
+Cada versão publicada armazena uma definição canônica e um manifesto de runtime.
+Consultas dinâmicas ficam pinadas nessa versão; uma publicação futura não altera
+consultas já agendadas.
 
-## Indicadores das abas
+## Validação
 
-Durante a gravação, cada aba exibe um ícone de status:
+```bash
+npm run db:generate
+npm run db:push
+npm run build --workspace=backend
+npm test --workspace=backend
+npm run lint --workspace=frontend
+npm test --workspace=frontend
+npm run build --workspace=frontend
+npm run test:e2e --workspace=frontend
+npm run eval:psychology --workspace=backend
+```
 
-- ✏ **Azul pulsando** — A IA está preenchendo campos desta aba agora
-- ⚠ **Âmbar** — Aba acessada mas com campos incompletos
-- ✓ **Verde** — Aba completa
+`eval:psychology` valida o corpus sintético sem chamar a API. Para executar os
+casos contra os modelos configurados, acrescente `-- --execute` e forneça uma chave
+válida.
 
----
+## Segurança operacional
 
-## Arquivos gerados pelo sistema
-
-| Arquivo | Local |
-|---------|-------|
-| Banco de dados | `backend/prisma/dev.db` |
-| Gravações de áudio | `backend/uploads/audio/` |
-
-> As gravações de áudio são salvas permanentemente para fins de auditoria, conforme especificado.
-
----
-
-## Observações
-
-- Este é um projeto experimental (MVP) para estudo e validação de conceito
-- Não possui autenticação de usuários
-- Não é homologado para uso clínico em produção
-- Dados são armazenados localmente no arquivo SQLite
-- A qualidade da transcrição depende do microfone e do ambiente (evite ruídos)
-- Recomenda-se usar fones com microfone para melhor resultado
+- nenhum valor de IA é aceito sem campo permitido, tipo válido, falante autorizado
+  e citação literal no segmento normalizado;
+- falas desconhecidas não alimentam o prontuário nem documentos finais;
+- conteúdo manual prevalece e nunca é apagado silenciosamente;
+- correções de documentos confirmados geram adendo imutável;
+- exportações compartilháveis nunca incluem o registro restrito;
+- áudio não é permanente: o prazo é configurável e executado pelo motor de retenção.

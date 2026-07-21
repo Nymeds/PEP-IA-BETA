@@ -1,8 +1,7 @@
 import { randomUUID } from 'crypto'
 import { FastifyReply, FastifyRequest } from 'fastify'
-import { createReadStream, existsSync } from 'fs'
 import { getPrisma } from '../lib/prisma'
-import { transcribeAudioBuffer, saveFullAudio } from '../services/speech.service'
+import { transcribeAudioBuffer, saveFullAudio, readFullAudio, removeStoredAudio } from '../services/speech.service'
 import {
   CLINICAL_FIELD_IDS,
   ClinicalFieldId,
@@ -20,6 +19,20 @@ import {
 import { runFinalReview } from '../services/review.service'
 import { suggestTopics } from '../services/analysis.service'
 import { createRealtimeClientSecret } from '../services/realtime.service'
+import { resolveClinicalRecordEngine } from '../services/clinical-record-engine.service'
+import { isDynamicPsychologyEnabled } from '../services/form-templates.service'
+import { recordSensitiveAccess } from '../services/access-audit.service'
+import {
+  enqueuePendingAudioDeletion,
+  processPendingAudioDeletions,
+} from '../services/retention.service'
+import {
+  assertDynamicRecordingConsent,
+  createDynamicTranscriptVersion,
+  generateDynamicDocument,
+  getDynamicConversationTopics,
+  reinterpretDynamicConsultation,
+} from './dynamic-consultations.controller'
 import {
   CONSULTATION_STATUS,
   normalizeConsultationStatus,
@@ -66,6 +79,33 @@ const CLINICAL_FIELDS = [
   'assessment',
   'plan',
 ] as const
+
+class AudioSaveConflictError extends Error {}
+
+const LEGACY_NUMBER_FIELDS = new Set<string>(['weight', 'height', 'bmi'])
+
+function pickLegacyConsultationUpdate(body: Record<string, unknown>) {
+  const data: Record<string, string | number | null> = {}
+  for (const field of CLINICAL_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue
+    const value = body[field]
+    if (value === null) {
+      data[field] = null
+      continue
+    }
+    if (LEGACY_NUMBER_FIELDS.has(field)) {
+      if (typeof value === 'number' && Number.isFinite(value)) data[field] = value
+      continue
+    }
+    if (typeof value === 'string' && value.length <= 200_000) data[field] = value
+  }
+
+  const transcript = body.transcript
+  if (transcript === null || (typeof transcript === 'string' && transcript.length <= 2_000_000)) {
+    data.transcript = transcript
+  }
+  return data
+}
 
 const JSON_CLINICAL_FIELDS = new Set<string>([
   'symptoms',
@@ -441,7 +481,9 @@ async function persistTranscriptSegment(input: {
   kind: string
   payload?: string
 }) {
-  return getPrisma().$transaction(async (tx) => {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await getPrisma().$transaction(async (tx) => {
     const consultation = await tx.consultation.findUnique({
       where: { id: input.consultationId },
       select: { transcript: true },
@@ -495,7 +537,16 @@ async function persistTranscriptSegment(input: {
       appendedText: input.text,
       fullTranscript,
     }
-  })
+      })
+    } catch (error) {
+      const code = typeof error === 'object' && error && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : ''
+      if ((code === 'P2002' || code === 'P2034') && attempt < 3) continue
+      throw error
+    }
+  }
+  throw new Error('Nao foi possivel ordenar o segmento de transcricao')
 }
 
 async function findOwnedConsultation(
@@ -530,6 +581,10 @@ export async function startConsultation(
       })
 
       if (!consultation) return null
+
+      if (consultation.formMode === 'dynamic' && !isDynamicPsychologyEnabled()) {
+        throw new Error('Os formularios dinamicos de Psicologia estao desativados')
+      }
 
       const normalizedStatus = normalizeConsultationStatus(consultation.status)
       if (normalizedStatus === CONSULTATION_STATUS.FINISHED) {
@@ -585,6 +640,15 @@ export async function closeConsultation(
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
 
+  if (
+    resolveClinicalRecordEngine(consultation.formMode).formMode === 'dynamic' &&
+    normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.FINISHED
+  ) {
+    return reply.status(409).send({
+      error: 'Confirme uma evolucao dinamica revisada antes de encerrar a consulta',
+    })
+  }
+
   const normalizedStatus = normalizeConsultationStatus(consultation.status)
   if (normalizedStatus === CONSULTATION_STATUS.WAITING) {
     return reply.status(409).send({ error: 'Inicie a consulta antes de encerrar' })
@@ -626,42 +690,14 @@ export async function updateConsultation(
 ) {
   const existing = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!existing) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (resolveClinicalRecordEngine(existing.formMode).formMode === 'dynamic') {
+    return reply.status(409).send({ error: 'Use o autosave do formulario dinamico para esta consulta' })
+  }
 
   const body = (req.body || {}) as Record<string, unknown>
-  const {
-    id: _id,
-    patientId: _patientId,
-    userId: _userId,
-    scheduleId: _scheduleId,
-    status: _status,
-    scheduledAt: _scheduledAt,
-    startedAt: _startedAt,
-    finishedAt: _finishedAt,
-    createdAt: _createdAt,
-    updatedAt: _updatedAt,
-    patient: _patient,
-    schedule: _schedule,
-    versions: _versions,
-    aiState: _aiState,
-    manualFields: _manualFields,
-    ...data
-  } = body
-  void _id
-  void _patientId
-  void _userId
-  void _scheduleId
-  void _status
-  void _scheduledAt
-  void _startedAt
-  void _finishedAt
-  void _createdAt
-  void _updatedAt
-  void _patient
-  void _schedule
-  void _versions
-  void _aiState
-  const manualFields = Array.isArray(_manualFields)
-    ? _manualFields.filter(
+  const data = pickLegacyConsultationUpdate(body)
+  const manualFields = Array.isArray(body.manualFields)
+    ? body.manualFields.filter(
       (field): field is ClinicalFieldId =>
         typeof field === 'string' && CLINICAL_FIELD_IDS.includes(field as ClinicalFieldId)
     )
@@ -701,7 +737,7 @@ export async function updateConsultation(
 
     return tx.consultation.update({
       where: { id: existing.id },
-      data: data as Record<string, unknown>,
+      data,
       include: { patient: true, schedule: true, aiState: true },
     })
   })
@@ -715,6 +751,13 @@ export async function transcribeChunk(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  const engine = resolveClinicalRecordEngine(consultation.formMode)
+  if (engine.formMode === 'dynamic' && normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
+    return reply.status(409).send({ error: 'A gravacao so e permitida durante uma consulta em andamento' })
+  }
+  if (engine.requiresRecordingConsent) {
+    await assertDynamicRecordingConsent(consultation.id, req.authUser!.id)
+  }
 
   const fileData = await req.file()
   if (!fileData) return reply.status(400).send({ error: 'Nenhum arquivo de audio recebido' })
@@ -747,6 +790,13 @@ export async function createRealtimeToken(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  const engine = resolveClinicalRecordEngine(consultation.formMode)
+  if (engine.formMode === 'dynamic' && normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
+    return reply.status(409).send({ error: 'A gravacao so e permitida durante uma consulta em andamento' })
+  }
+  if (engine.requiresRecordingConsent) {
+    await assertDynamicRecordingConsent(consultation.id, req.authUser!.id)
+  }
 
   try {
     const clientSecret = await createRealtimeClientSecret(req.authUser!.id)
@@ -768,11 +818,28 @@ export async function appendRealtimeTranscript(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  const engine = resolveClinicalRecordEngine(consultation.formMode)
+  if (engine.formMode === 'dynamic' && normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
+    return reply.status(409).send({ error: 'A transcricao so pode ser alterada durante uma consulta em andamento' })
+  }
+  if (engine.requiresRecordingConsent) {
+    await assertDynamicRecordingConsent(consultation.id, req.authUser!.id)
+  }
 
   const itemId = req.body?.itemId?.trim()
   const text = req.body?.text?.trim()
   if (!itemId || !text) {
     return reply.send({ appendedText: '', fullTranscript: consultation.transcript || null })
+  }
+  if (itemId.length > 200) {
+    return reply.status(400).send({ error: 'O identificador do segmento e muito longo' })
+  }
+  if (text.length > 50_000) {
+    return reply.status(400).send({ error: 'O segmento de transcricao excede o limite permitido' })
+  }
+  const payload = req.body?.payload ? JSON.stringify(req.body.payload) : undefined
+  if (payload && payload.length > 20_000) {
+    return reply.status(400).send({ error: 'Os metadados do segmento excedem o limite permitido' })
   }
 
   const persisted = await persistTranscriptSegment({
@@ -781,7 +848,7 @@ export async function appendRealtimeTranscript(
     text,
     source: 'openai_realtime',
     kind: 'completed',
-    payload: req.body?.payload ? JSON.stringify(req.body.payload) : undefined,
+    payload,
   })
 
   return reply.send(persisted)
@@ -798,6 +865,13 @@ export async function getRawTranscript(
 
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
 
+  await recordSensitiveAccess({
+    actorUserId: req.authUser!.id,
+    consultationId: consultation.id,
+    dataClass: 'transcricao_consulta',
+    action: 'visualizar_transcricao',
+    requestId: req.id,
+  })
   const payload = await buildRawTranscriptPayload(consultation.id, consultation.transcript)
   return reply.send(payload)
 }
@@ -808,6 +882,9 @@ export async function reinterpretConsultation(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (resolveClinicalRecordEngine(consultation.formMode).formMode === 'dynamic') {
+    return reinterpretDynamicConsultation(req, reply)
+  }
   if (!consultation.transcript?.trim()) return reply.send({ extracted: {}, suggestions: [], fieldMeta: {} })
 
   if (process.env.AI_PIPELINE_V2 === 'false') {
@@ -988,6 +1065,9 @@ export async function updateAiState(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (resolveClinicalRecordEngine(consultation.formMode).formMode === 'dynamic') {
+    return reply.status(409).send({ error: 'Use a central de revisao do formulario dinamico' })
+  }
 
   const requestedTemplate = req.body?.templateId
   if (requestedTemplate && !Object.prototype.hasOwnProperty.call({
@@ -1055,20 +1135,92 @@ export async function saveAudio(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  const engine = resolveClinicalRecordEngine(consultation.formMode)
+  if (engine.formMode === 'dynamic' && normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
+    return reply.status(409).send({ error: 'O audio so pode ser salvo durante uma consulta em andamento' })
+  }
+  if (engine.requiresRecordingConsent) {
+    await assertDynamicRecordingConsent(consultation.id, req.authUser!.id)
+  }
 
   const fileData = await req.file()
   if (!fileData) return reply.status(400).send({ error: 'Nenhum arquivo de audio' })
 
   const buffer = await fileData.toBuffer()
   const mimeType = fileData.mimetype || 'audio/webm'
-  const filePath = await saveFullAudio(consultation.id, buffer, mimeType)
+  const savedAudio = await saveFullAudio(consultation.id, buffer, mimeType)
+  const audioSavedAt = new Date()
+  const retentionPolicy = await getPrisma().audioRetentionPolicy.findUnique({
+    where: { userId: req.authUser!.id },
+  })
+  const retentionDays = Math.max(1825, retentionPolicy?.audioRetentionDays || 1825)
+  const audioDeleteAt = retentionPolicy?.legalHold
+    ? null
+    : new Date(audioSavedAt.getTime() + retentionDays * 24 * 60 * 60 * 1000)
 
-  await getPrisma().consultation.update({
-    where: { id: consultation.id },
-    data: { audioPath: filePath },
+  const prisma = getPrisma()
+  try {
+    await prisma.$transaction(async (tx) => {
+      const claimed = await tx.consultation.updateMany({
+        where: {
+          id: consultation.id,
+          userId: req.authUser!.id,
+          audioPath: consultation.audioPath || null,
+        },
+        data: {
+          audioPath: savedAudio.filePath,
+          audioSavedAt,
+          audioEncrypted: savedAudio.encrypted,
+          audioDeleteAt,
+        },
+      })
+      if (claimed.count !== 1) {
+        throw new AudioSaveConflictError('O audio foi alterado em outra sessao')
+      }
+      if (consultation.audioPath && consultation.audioPath !== savedAudio.filePath) {
+        await tx.pendingAudioDeletion.upsert({
+          where: { filePath: consultation.audioPath },
+          create: {
+            filePath: consultation.audioPath,
+            userId: req.authUser!.id,
+            consultationId: consultation.id,
+            reason: 'Arquivo substituido por uma nova gravacao',
+          },
+          update: {
+            userId: req.authUser!.id,
+            consultationId: consultation.id,
+            reason: 'Arquivo substituido por uma nova gravacao',
+            nextAttemptAt: new Date(),
+            lastError: null,
+          },
+        })
+      }
+    })
+  } catch (error) {
+    await enqueuePendingAudioDeletion({
+      filePath: savedAudio.filePath,
+      userId: req.authUser!.id,
+      consultationId: consultation.id,
+      reason: 'Arquivo novo removido apos falha ao atualizar a consulta',
+    }).catch(async () => {
+      await removeStoredAudio(savedAudio.filePath).catch(() => undefined)
+    })
+    await processPendingAudioDeletions().catch(() => undefined)
+    if (error instanceof AudioSaveConflictError) {
+      return reply.status(409).send({ error: error.message })
+    }
+    throw error
+  }
+  await processPendingAudioDeletions().catch((error) => {
+    req.log.error({ requestId: req.id, name: error instanceof Error ? error.name : 'Error' }, 'Falha ao processar fila de audio')
   })
 
-  return reply.send({ audioPath: filePath })
+  return reply.send({
+    audioPath: savedAudio.filePath,
+    savedAt: audioSavedAt,
+    encrypted: savedAudio.encrypted,
+    deleteAt: audioDeleteAt,
+  })
 }
 
 export async function finalizeConsultation(
@@ -1078,6 +1230,12 @@ export async function finalizeConsultation(
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
 
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (resolveClinicalRecordEngine(consultation.formMode).formMode === 'dynamic') {
+    return generateDynamicDocument(req as FastifyRequest<{
+      Params: { id: string }
+      Body: { format?: 'SOAP' | 'DAP' | 'BIRP'; documentKind?: 'compartilhavel' | 'restrito' }
+    }>, reply)
+  }
   const normalizedStatus = normalizeConsultationStatus(consultation.status)
   if (normalizedStatus === CONSULTATION_STATUS.WAITING) {
     return reply.status(409).send({ error: 'Inicie a consulta antes de finalizar' })
@@ -1096,6 +1254,7 @@ export async function finalizeConsultation(
   })
   const review = await runFinalReview({
     transcript: consultation.transcript,
+    audioPath: consultation.audioPath,
     templateId: aiState.templateId as ClinicalTemplateId,
     clinicalState: buildClinicalState(consultation as unknown as Record<string, unknown>),
   })
@@ -1177,15 +1336,34 @@ export async function streamAudio(
 ) {
   const consultation = await getPrisma().consultation.findFirst({
     where: { id: req.params.id, userId: req.authUser!.id },
-    select: { audioPath: true },
+    select: { id: true, audioPath: true },
   })
 
-  if (!consultation?.audioPath || !existsSync(consultation.audioPath)) {
+  if (!consultation?.audioPath) {
     return reply.status(404).send({ error: 'Audio nao encontrado' })
   }
 
-  const contentType = consultation.audioPath.endsWith('.mp3') ? 'audio/mpeg' : 'audio/webm'
-  return reply.type(contentType).send(createReadStream(consultation.audioPath))
+  let audio: Buffer
+  try {
+    audio = await readFullAudio(consultation.audioPath)
+  } catch {
+    return reply.status(404).send({ error: 'Audio nao encontrado' })
+  }
+
+  await recordSensitiveAccess({
+    actorUserId: req.authUser!.id,
+    consultationId: consultation.id,
+    dataClass: 'audio_consulta',
+    action: 'reproduzir_audio',
+    requestId: req.id,
+  })
+
+  const contentType = consultation.audioPath.includes('.mp3') ? 'audio/mpeg' : 'audio/webm'
+  return reply
+    .header('Cache-Control', 'no-store')
+    .header('X-Content-Type-Options', 'nosniff')
+    .type(contentType)
+    .send(audio)
 }
 
 export async function getConversationTopics(
@@ -1194,10 +1372,13 @@ export async function getConversationTopics(
 ) {
   const consultation = await getPrisma().consultation.findFirst({
     where: { id: req.params.id, userId: req.authUser!.id },
-    select: { id: true, transcript: true },
+    select: { id: true, transcript: true, formMode: true },
   })
 
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (resolveClinicalRecordEngine(consultation.formMode).formMode === 'dynamic') {
+    return getDynamicConversationTopics(req, reply)
+  }
   const rawPayload = await buildRawTranscriptPayload(consultation.id, consultation.transcript)
   const sourceTranscript = rawPayload.rawTranscript.trim() || consultation.transcript?.trim() || ''
   if (!sourceTranscript) return reply.send({ topics: [] })
@@ -1223,6 +1404,9 @@ export async function createVersion(
   })
 
   if (!current) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+  if (resolveClinicalRecordEngine(current.formMode).formMode === 'dynamic') {
+    return createDynamicTranscriptVersion(req, reply)
+  }
 
   const count = await getPrisma().consultationVersion.count({
     where: { consultationId: current.id },

@@ -86,6 +86,11 @@ export interface FamilyHistory {
 export interface Consultation {
   id: string
   patientId: string
+  formMode?: 'legacy' | 'dynamic'
+  specialtyCode?: string | null
+  formTemplateVersionId?: string | null
+  formDefinitionSnapshot?: string | null
+  formPinnedAt?: string | null
   scheduleId?: string | null
   schedule?: ScheduleAgenda | null
   patient?: Patient
@@ -357,6 +362,8 @@ export interface ScheduleAgenda {
   id: string
   title: string
   specialty: string
+  specialtyCode?: string | null
+  formTemplateId?: string | null
   status: ScheduleStatus
   activeWeekDays: number[]
   workOnHolidays: boolean
@@ -379,6 +386,22 @@ export interface CalendarAppointment {
   scheduleId?: string | null
   scheduleTitle?: string | null
   scheduleSpecialty?: string | null
+  scheduleSpecialtyCode?: string | null
+  scheduleFormTemplateId?: string | null
+  formMode?: 'legacy' | 'dynamic' | null
+  specialtyCode?: string | null
+  formTemplateVersionId?: string | null
+  formTemplateName?: string | null
+  formVersion?: number | null
+  formTemplateVersion?: {
+    id?: string
+    version?: number
+    template?: { id?: string; name?: string; status?: string } | null
+  } | null
+  consentStatus?: string | boolean | null
+  consentReady?: boolean | null
+  aiReadiness?: string | boolean | null
+  aiReady?: boolean | null
 }
 
 export interface DashboardStats {

@@ -1,6 +1,6 @@
 'use client'
 
-import { useDeferredValue, useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarPlus, Search, UserRound, X } from 'lucide-react'
@@ -30,7 +30,14 @@ export function AgendaQuickScheduleModal({
   const [search, setSearch] = useState('')
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null)
   const [selectedSlot, setSelectedSlot] = useState<string>('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const onCloseRef = useRef(onClose)
+  const bookingPendingRef = useRef(false)
   const deferredSearch = useDeferredValue(search.trim())
+
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   useEffect(() => {
     if (!open) return
@@ -70,6 +77,31 @@ export function AgendaQuickScheduleModal({
     },
   })
 
+  useEffect(() => {
+    bookingPendingRef.current = booking.isPending
+  }, [booking.isPending])
+
+  useEffect(() => {
+    if (!open) return
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
+    const animationFrame = window.requestAnimationFrame(() => searchInputRef.current?.focus())
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || bookingPendingRef.current) return
+      event.preventDefault()
+      onCloseRef.current()
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.cancelAnimationFrame(animationFrame)
+      document.removeEventListener('keydown', handleKeyDown)
+      if (previouslyFocused?.isConnected) previouslyFocused.focus()
+    }
+  }, [open])
+
   const canSubmit =
     Boolean(selectedSlot) &&
     Boolean(selectedPatient || search.trim().length >= 2) &&
@@ -85,17 +117,24 @@ export function AgendaQuickScheduleModal({
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/35 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agenda-quick-schedule-title"
+        className="card w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col"
+      >
         <div className="px-6 py-4 border-b border-slate-100 flex items-start justify-between gap-4">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400 mb-1">Agendamento rapido</p>
-            <h3 className="text-lg font-semibold text-slate-900 capitalize">{formatDateHeading(date)}</h3>
+            <h3 id="agenda-quick-schedule-title" className="text-lg font-semibold text-slate-900 capitalize">
+              {formatDateHeading(date)}
+            </h3>
             <p className="text-sm text-slate-500 mt-1">
               Selecione pelo nome e reserve um horario sem abrir o cadastro completo.
             </p>
           </div>
-          <button onClick={onClose} className="btn-secondary p-2">
-            <X className="w-4 h-4" />
+          <button type="button" onClick={onClose} className="btn-secondary p-2" aria-label="Fechar agendamento rápido">
+            <X className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
 
@@ -105,6 +144,7 @@ export function AgendaQuickScheduleModal({
             <div className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-2 mb-4">
               <Search className="w-4 h-4 text-slate-400" />
               <input
+                ref={searchInputRef}
                 value={search}
                 onChange={(event) => {
                   setSearch(event.target.value)

@@ -11,6 +11,8 @@ interface Props {
   connectionError?: string | null
   transcript: string
   isInterpreting?: boolean
+  disabled?: boolean
+  disabledReason?: string
   onStart: () => void
   onStop: () => void
 }
@@ -27,6 +29,8 @@ export function RecordingBar({
   connectionError,
   transcript,
   isInterpreting,
+  disabled,
+  disabledReason,
   onStart,
   onStop,
 }: Props) {
@@ -34,6 +38,7 @@ export function RecordingBar({
   const startedAtRef = useRef<number | null>(null)
   const isRecording = recordingState === 'recording'
   const isProcessing = recordingState === 'processing'
+  const startDisabled = Boolean(disabled) && !isRecording
 
   useEffect(() => {
     if (!isRecording) {
@@ -79,7 +84,9 @@ export function RecordingBar({
               {isInterpreting ? <span className="inline-flex items-center gap-1 text-primary-700"><Sparkles className="h-3.5 w-3.5" /> Preenchendo PEP</span> : null}
             </div>
             <p className="mt-0.5 truncate text-[11px] text-slate-500">
-              {connectionError || (isRecording ? 'Áudio preservado durante toda a sessão.' : 'Nenhuma gravação ativa.')}
+              {connectionError || (startDisabled
+                ? disabledReason || 'A gravação ainda não está liberada.'
+                : isRecording ? 'Áudio preservado durante toda a sessão.' : 'Nenhuma gravação ativa.')}
             </p>
           </div>
         </div>
@@ -87,14 +94,14 @@ export function RecordingBar({
         <button
           type="button"
           onClick={isRecording ? onStop : isProcessing ? undefined : onStart}
-          disabled={isProcessing}
+          disabled={isProcessing || startDisabled}
           className={cn(
             'flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-white shadow-md transition-colors',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2',
-            isRecording ? 'bg-red-600 hover:bg-red-700' : isProcessing ? 'cursor-not-allowed bg-slate-300' : 'bg-primary-600 hover:bg-primary-700'
+            isRecording ? 'bg-red-600 hover:bg-red-700' : isProcessing || startDisabled ? 'cursor-not-allowed bg-slate-300' : 'bg-primary-600 hover:bg-primary-700'
           )}
-          aria-label={isRecording ? 'Parar gravação' : isProcessing ? 'Processando áudio' : 'Iniciar gravação'}
-          title={isRecording ? 'Parar gravação' : 'Iniciar gravação'}
+          aria-label={isRecording ? 'Parar gravação' : isProcessing ? 'Processando áudio' : startDisabled ? disabledReason || 'Gravação bloqueada' : 'Iniciar gravação'}
+          title={isRecording ? 'Parar gravação' : startDisabled ? disabledReason || 'Gravação bloqueada' : 'Iniciar gravação'}
         >
           {isProcessing ? <Loader2 className="h-5 w-5 animate-spin" /> : isRecording ? <Square className="h-4 w-4" fill="currentColor" /> : <Mic className="h-5 w-5" />}
         </button>

@@ -9,6 +9,8 @@ import { authRoutes } from './routes/auth.routes'
 import { patientsRoutes } from './routes/patients.routes'
 import { consultationsRoutes } from './routes/consultations.routes'
 import { scheduleRoutes } from './routes/schedule.routes'
+import { formTemplatesRoutes } from './routes/form-templates.routes'
+import { retentionRoutes } from './routes/retention.routes'
 
 // Carrega a raiz como defaults e o backend/.env por cima (tem prioridade)
 dotenv.config({ path: path.resolve(__dirname, '../../.env') })
@@ -71,6 +73,11 @@ export function buildServer() {
     if (request.method === 'OPTIONS') return
 
     const pathname = new URL(request.raw.url || '/', 'http://localhost').pathname
+    if (pathname.startsWith('/api/')) {
+      reply.header('Cache-Control', 'no-store, private')
+      reply.header('Pragma', 'no-cache')
+      reply.header('Vary', 'Cookie')
+    }
     if (PUBLIC_ROUTES.has(`${request.method}:${pathname}`)) return
 
     const token = getTokenFromRequest(request)
@@ -102,6 +109,8 @@ export function buildServer() {
   server.register(patientsRoutes, { prefix: '/api/patients' })
   server.register(consultationsRoutes, { prefix: '/api/consultations' })
   server.register(scheduleRoutes, { prefix: '/api/schedule' })
+  server.register(formTemplatesRoutes, { prefix: '/api/form-templates' })
+  server.register(retentionRoutes, { prefix: '/api/settings/retention' })
 
   server.setErrorHandler((error, request, reply) => {
     const normalizedError = error instanceof Error ? error : new Error('Erro interno')

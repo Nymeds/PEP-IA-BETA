@@ -1,5 +1,7 @@
-import OpenAI from 'openai'
+import OpenAI, { toFile } from 'openai'
 import { z } from 'zod'
+import { existsSync } from 'fs'
+import { basename } from 'path'
 import {
   ClinicalSuggestion,
   ClinicalTemplateId,
@@ -10,6 +12,7 @@ import {
   SpecialtyDataItem,
   extractClinicalDelta,
 } from './extraction.service'
+import { readFullAudio } from './speech.service'
 
 let _openai: OpenAI | null = null
 const getOpenAI = () => {
@@ -18,12 +21,15 @@ const getOpenAI = () => {
 }
 
 export interface DialogueTurn {
-  speaker: 'Medico' | 'Paciente' | 'Indefinido'
+  speaker: 'Medico' | 'Paciente' | 'Terceiro' | 'Indefinido'
   text: string
+  start?: number
+  end?: number
+  diarizationLabel?: string
 }
 
 const diarizationZodSchema = z.object({
-  turns: z.array(z.object({ speaker: z.enum(['Medico', 'Paciente', 'Indefinido']), text: z.string() })),
+  turns: z.array(z.object({ speaker: z.enum(['Medico', 'Paciente', 'Terceiro', 'Indefinido']), text: z.string() })),
 })
 
 const DIARIZATION_SCHEMA = {
@@ -36,7 +42,7 @@ const DIARIZATION_SCHEMA = {
         type: 'object',
         additionalProperties: false,
         properties: {
-          speaker: { type: 'string', enum: ['Medico', 'Paciente', 'Indefinido'] },
+          speaker: { type: 'string', enum: ['Medico', 'Paciente', 'Terceiro', 'Indefinido'] },
           text: { type: 'string' },
         },
         required: ['speaker', 'text'],
@@ -51,9 +57,47 @@ const DIARIZATION_PROMPT = `Voce recebe a transcricao corrida de uma consulta me
 Separe o texto em turnos de fala sem resumir, inventar ou alterar fatos clinicos.
 - Medico: conduz anamnese, descreve exame, explica, orienta, solicita exames ou define conduta.
 - Paciente: relata sintomas, historia, duvidas e responde ao profissional.
+- Terceiro: acompanhante, responsavel, familiar, interprete ou outra pessoa presente.
 - Use Indefinido apenas quando nao houver sinal suficiente.
-- Descarte ruido evidente e texto sem valor clinico.
+- Nao apague falas. Preserve o texto para que relevancia e autorizacao sejam revisadas pelo profissional.
 `
+
+interface DiarizedAudioSegment {
+  speaker?: string
+  text?: string
+  start?: number
+  end?: number
+}
+
+/**
+ * Diarizacao acustica da gravacao. Os rotulos retornados (A, B, C...) identificam
+ * apenas vozes desta consulta e nunca sao usados como biometria persistente.
+ */
+export async function diarizeAudio(audioPath: string): Promise<DialogueTurn[]> {
+  if (!audioPath || !existsSync(audioPath)) return []
+
+  const model = process.env.OPENAI_DIARIZATION_MODEL || 'gpt-4o-transcribe-diarize'
+  const audio = await readFullAudio(audioPath)
+  const filename = basename(audioPath).replace(/\.enc$/, '')
+  const response = await getOpenAI().audio.transcriptions.create({
+    file: await toFile(audio, filename),
+    model,
+    response_format: 'diarized_json',
+    chunking_strategy: 'auto',
+  } as never) as unknown as { segments?: DiarizedAudioSegment[] }
+
+  return (response.segments || []).flatMap((segment) => {
+    const text = segment.text?.trim()
+    if (!text) return []
+    return [{
+      speaker: 'Indefinido' as const,
+      text,
+      start: typeof segment.start === 'number' ? segment.start : undefined,
+      end: typeof segment.end === 'number' ? segment.end : undefined,
+      diarizationLabel: segment.speaker?.trim() || undefined,
+    }]
+  })
+}
 
 export async function diarizeTranscript(transcript: string): Promise<DialogueTurn[]> {
   if (!transcript.trim()) return []
@@ -100,10 +144,19 @@ export interface FinalReview {
 // A revisao final combina a evidencia diarizada, a extracao e o SOAP em uma unica chamada clinica.
 export async function runFinalReview(input: {
   transcript: string
+  audioPath?: string | null
   templateId: ClinicalTemplateId
   clinicalState: Record<string, unknown>
 }): Promise<FinalReview> {
-  const turns = await diarizeTranscript(input.transcript)
+  let turns: DialogueTurn[] = []
+  if (input.audioPath) {
+    try {
+      turns = await diarizeAudio(input.audioPath)
+    } catch (error) {
+      console.error('[diarizacao] Falha na passagem de audio; usando transcricao:', error)
+    }
+  }
+  if (!turns.length) turns = await diarizeTranscript(input.transcript)
   const structuredText = turns.length
     ? turns.map((turn) => `${turn.speaker}: ${turn.text}`).join('\n')
     : input.transcript

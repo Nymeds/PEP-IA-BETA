@@ -27,6 +27,7 @@ import {
   RawTranscriptResponse,
   TranscribeResponse,
 } from '@/types'
+import { notifySessionExpired } from './client-session'
 
 export const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
 
@@ -56,7 +57,8 @@ function buildUrl(path: string, query?: Record<string, string | number | undefin
   return url.toString()
 }
 
-async function parseError(res: Response): Promise<never> {
+async function parseError(res: Response, notifyAuthenticationFailure = true): Promise<never> {
+  if (res.status === 401 && notifyAuthenticationFailure) notifySessionExpired()
   const err = await res.json().catch(() => ({ error: res.statusText }))
   throw new ApiError(err.message || err.error || 'Não foi possível concluir a solicitação', res.status, {
     code: err.code,
@@ -88,6 +90,7 @@ async function request<T>(
     void _timeoutMs
     res = await fetch(buildUrl(path, query), {
       ...fetchOptions,
+      cache: 'no-store',
       headers,
       signal: controller.signal,
       credentials: 'include',
@@ -102,7 +105,11 @@ async function request<T>(
     externalSignal?.removeEventListener('abort', abortFromExternal)
   }
 
-  if (!res.ok) return parseError(res)
+  if (!res.ok) {
+    const isPublicAuthenticationRequest =
+      path === '/api/auth/login' || path === '/api/auth/register'
+    return parseError(res, !isPublicAuthenticationRequest)
+  }
   if (res.status === 204) return undefined as T
   return res.json()
 }
@@ -121,6 +128,36 @@ export const api = {
       }),
     me: () => request<{ user: AuthUser }>('/api/auth/me'),
     logout: () => request<{ success: boolean }>('/api/auth/logout', { method: 'POST' }),
+  },
+
+  retention: {
+    get: () => request<{
+      audioRetentionDays: number
+      sharedRecordRetentionYears: number
+      restrictedRecordRetentionYears: number
+      legalHold: boolean
+      minimums: {
+        audioRetentionDays: number
+        sharedRecordRetentionYears: number
+        restrictedRecordRetentionYears: number
+      }
+    }>('/api/settings/retention'),
+    update: (data: {
+      audioRetentionDays: number
+      sharedRecordRetentionYears: number
+      restrictedRecordRetentionYears: number
+      legalHold: boolean
+    }) => request<{
+      audioRetentionDays: number
+      sharedRecordRetentionYears: number
+      restrictedRecordRetentionYears: number
+      legalHold: boolean
+      minimums: {
+        audioRetentionDays: number
+        sharedRecordRetentionYears: number
+        restrictedRecordRetentionYears: number
+      }
+    }>('/api/settings/retention', { method: 'PATCH', body: JSON.stringify(data) }),
   },
 
   patients: {
@@ -178,6 +215,7 @@ export const api = {
         method: 'POST',
         body: formData,
         credentials: 'include',
+        cache: 'no-store',
       })
       if (!res.ok) return parseError(res)
       return res.json()
@@ -206,6 +244,7 @@ export const api = {
         headers: options ? { 'Content-Type': 'application/json' } : undefined,
         body: options ? JSON.stringify(options) : undefined,
         credentials: 'include',
+        cache: 'no-store',
       })
       if (!res.ok) return parseError(res)
       return res.json()
@@ -236,6 +275,7 @@ export const api = {
         method: 'POST',
         body: formData,
         credentials: 'include',
+        cache: 'no-store',
       })
       if (!res.ok) return parseError(res)
       return res.json()

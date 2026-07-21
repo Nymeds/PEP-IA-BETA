@@ -13,5 +13,10 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
+  },
+  "overrides": {
+    "next@15.5.20": {
+      "postcss": "8.5.20"
+    }
   }
 }

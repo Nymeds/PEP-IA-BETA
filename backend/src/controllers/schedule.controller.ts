@@ -1,4 +1,5 @@
 import { FastifyReply, FastifyRequest } from 'fastify'
+import { Prisma } from '@prisma/client'
 import { getPrisma } from '../lib/prisma'
 import {
   CONSULTATION_STATUS,
@@ -14,10 +15,18 @@ import {
   normalizeScheduleStatus,
   toPrismaScheduleSettings,
 } from '../lib/schedule'
+import {
+  PSYCHOLOGY_SPECIALTY_CODE,
+  ensureSpecialtyProfile,
+  resolvePublishedVersionForSchedule,
+  resolveScheduleTemplate,
+} from '../services/form-templates.service'
 
 interface ScheduleSettingsBody {
   title?: string
   specialty?: string
+  specialtyCode?: string | null
+  formTemplateId?: string | null
   status?: string
   activeWeekDays?: number[]
   workOnHolidays?: boolean
@@ -31,6 +40,31 @@ interface ScheduleSettingsBody {
     slots?: number
   }>
 }
+
+const appointmentInclude = Prisma.validator<Prisma.ConsultationInclude>()({
+  patient: { select: { name: true } },
+  schedule: {
+    select: {
+      id: true,
+      title: true,
+      specialty: true,
+      specialtyCode: true,
+      formTemplateId: true,
+    },
+  },
+  formTemplateVersion: {
+    select: {
+      id: true,
+      version: true,
+      template: { select: { id: true, name: true, status: true } },
+    },
+  },
+  consents: { orderBy: { recordedAt: 'desc' } },
+  participants: { select: { id: true, role: true, active: true, authorized: true } },
+  aiState: { select: { processingThroughSequence: true } },
+})
+
+type AppointmentRecord = Prisma.ConsultationGetPayload<{ include: typeof appointmentInclude }>
 
 interface AgendaParams {
   agendaId: string
@@ -61,6 +95,8 @@ interface ScheduleRecord {
   userId: string
   title: string
   specialty: string
+  specialtyCode: string | null
+  formTemplateId: string | null
   status: string
   activeWeekDaysJson: string
   workOnHolidays: boolean
@@ -117,6 +153,8 @@ function serializeAgenda(record: ScheduleRecord) {
     id: record.id,
     title: record.title,
     specialty: record.specialty,
+    specialtyCode: record.specialtyCode,
+    formTemplateId: record.formTemplateId,
     status: normalizeScheduleStatus(record.status),
     activeWeekDays: settings.activeWeekDays,
     workOnHolidays: settings.workOnHolidays,
@@ -129,15 +167,24 @@ function serializeAgenda(record: ScheduleRecord) {
   }
 }
 
-function serializeAppointment(consultation: {
-  id: string
-  patientId: string
-  scheduledAt: Date | null
-  status: string
-  chiefComplaint: string | null
-  patient: { name: string }
-  schedule: { id: string; title: string; specialty: string } | null
-}) {
+function serializeAppointment(consultation: AppointmentRecord) {
+  const latestConsent = (type: string, participantId?: string) => consultation.consents.find(
+    (consent) => consent.type === type &&
+      (participantId === undefined || consent.participantId === participantId)
+  )
+  const activeClinicalParticipants = consultation.participants.filter(
+    (participant) => participant.active && participant.role !== 'profissional'
+  )
+  const consentReady = consultation.formMode !== 'dynamic' || (
+    latestConsent('gravacao_audio')?.granted === true &&
+    latestConsent('transcricao_ia')?.granted === true &&
+    activeClinicalParticipants.every((participant) =>
+      participant.authorized && latestConsent('participacao', participant.id)?.granted === true
+    )
+  )
+  const aiReady = consultation.formMode === 'dynamic' && consentReady &&
+    Boolean(consultation.formTemplateVersionId) &&
+    consultation.aiState?.processingThroughSequence == null
   return {
     id: consultation.id,
     patientId: consultation.patientId,
@@ -148,9 +195,21 @@ function serializeAppointment(consultation: {
       : null,
     status: normalizeConsultationStatus(consultation.status),
     chiefComplaint: consultation.chiefComplaint,
+    formMode: consultation.formMode,
+    specialtyCode: consultation.specialtyCode,
+    formTemplateVersionId: consultation.formTemplateVersionId,
+    formTemplateName: consultation.formTemplateVersion?.template.name || null,
+    formVersion: consultation.formTemplateVersion?.version || null,
+    formTemplateVersion: consultation.formTemplateVersion,
+    consentStatus: consultation.formMode === 'dynamic' ? (consentReady ? 'confirmado' : 'pendente') : null,
+    consentReady,
+    aiReadiness: consultation.formMode === 'dynamic' ? (aiReady ? 'pronta' : 'preparacao_pendente') : null,
+    aiReady,
     scheduleId: consultation.schedule?.id || null,
     scheduleTitle: consultation.schedule?.title || null,
     scheduleSpecialty: consultation.schedule?.specialty || null,
+    scheduleSpecialtyCode: consultation.schedule?.specialtyCode || null,
+    scheduleFormTemplateId: consultation.schedule?.formTemplateId || null,
   }
 }
 
@@ -168,10 +227,7 @@ async function listDayAppointments(userId: string, dateString: string) {
       userId,
       scheduledAt: { gte: dayStart, lte: dayEnd },
     },
-    include: {
-      patient: { select: { name: true } },
-      schedule: { select: { id: true, title: true, specialty: true } },
-    },
+    include: appointmentInclude,
     orderBy: { scheduledAt: 'asc' },
   })
 }
@@ -225,7 +281,7 @@ async function validateAgendaSlot(
   return { settings, dayAppointments: blockingAppointments }
 }
 
-function parseAgendaPayload(body: ScheduleSettingsBody) {
+function parseAgendaPayload(body: ScheduleSettingsBody, existing?: ScheduleRecord) {
   const title = body.title?.trim() || ''
   const specialty = body.specialty?.trim() || ''
 
@@ -246,9 +302,21 @@ function parseAgendaPayload(body: ScheduleSettingsBody) {
     })),
   })
 
+  const specialtyCode =
+    body.specialtyCode === undefined
+      ? existing?.specialtyCode || null
+      : body.specialtyCode?.trim().toLowerCase() || null
+  const specialtyChanged =
+    body.specialtyCode !== undefined && specialtyCode !== (existing?.specialtyCode || null)
+
   return {
     title,
     specialty,
+    specialtyCode,
+    formTemplateId:
+      body.formTemplateId === undefined
+        ? specialtyChanged ? null : existing?.formTemplateId || null
+        : body.formTemplateId?.trim() || null,
     status: normalizeScheduleStatus(body.status),
     settings,
   }
@@ -271,11 +339,24 @@ export async function createSchedule(
 ) {
   try {
     const payload = parseAgendaPayload(req.body || {})
+    if (payload.formTemplateId && payload.specialtyCode !== PSYCHOLOGY_SPECIALTY_CODE) {
+      return reply.status(400).send({ error: 'O formulario selecionado nao pertence a uma especialidade dinamica' })
+    }
+    if (payload.specialtyCode) {
+      await ensureSpecialtyProfile(payload.specialtyCode, payload.specialty)
+    }
+    const selectedTemplate = await resolveScheduleTemplate({
+      userId: req.authUser!.id,
+      specialtyCode: payload.specialtyCode,
+      formTemplateId: payload.formTemplateId,
+    })
     const agenda = await getPrisma().schedule.create({
       data: {
         userId: req.authUser!.id,
         title: payload.title,
         specialty: payload.specialty,
+        specialtyCode: payload.specialtyCode,
+        formTemplateId: selectedTemplate?.id || null,
         status: payload.status,
         ...toPrismaScheduleSettings(payload.settings),
       },
@@ -306,12 +387,25 @@ export async function updateSchedule(
     const existing = await findOwnedAgenda(req.params.agendaId, req.authUser!.id)
     if (!existing) return reply.status(404).send({ error: 'Agenda nao encontrada' })
 
-    const payload = parseAgendaPayload(req.body || {})
+    const payload = parseAgendaPayload(req.body || {}, existing)
+    if (payload.formTemplateId && payload.specialtyCode !== PSYCHOLOGY_SPECIALTY_CODE) {
+      return reply.status(400).send({ error: 'O formulario selecionado nao pertence a uma especialidade dinamica' })
+    }
+    if (payload.specialtyCode) {
+      await ensureSpecialtyProfile(payload.specialtyCode, payload.specialty)
+    }
+    const selectedTemplate = await resolveScheduleTemplate({
+      userId: req.authUser!.id,
+      specialtyCode: payload.specialtyCode,
+      formTemplateId: payload.formTemplateId,
+    })
     const agenda = await getPrisma().schedule.update({
       where: { id: existing.id },
       data: {
         title: payload.title,
         specialty: payload.specialty,
+        specialtyCode: payload.specialtyCode,
+        formTemplateId: selectedTemplate?.id || null,
         status: payload.status,
         ...toPrismaScheduleSettings(payload.settings),
       },
@@ -358,10 +452,7 @@ export async function getDashboard(
           scheduleId: { not: null },
           scheduledAt: { gte: start, lte: end },
         },
-        include: {
-          patient: { select: { name: true } },
-          schedule: { select: { id: true, title: true, specialty: true } },
-        },
+        include: appointmentInclude,
         orderBy: { scheduledAt: 'asc' },
       }),
       getPrisma().consultation.findMany({
@@ -370,10 +461,7 @@ export async function getDashboard(
           scheduleId: { not: null },
           scheduledAt: { gte: new Date() },
         },
-        include: {
-          patient: { select: { name: true } },
-          schedule: { select: { id: true, title: true, specialty: true } },
-        },
+        include: appointmentInclude,
         orderBy: { scheduledAt: 'asc' },
       }),
       getPrisma().patient.count({ where: { userId } }),
@@ -462,10 +550,7 @@ export async function getCalendar(
         scheduleId: agenda.id,
         scheduledAt: { gte: start, lte: end },
       },
-      include: {
-        patient: { select: { name: true } },
-        schedule: { select: { id: true, title: true, specialty: true } },
-      },
+      include: appointmentInclude,
       orderBy: { scheduledAt: 'asc' },
     })
 
@@ -614,12 +699,23 @@ export async function quickBookAppointment(
       return reply.status(404).send({ error: 'Paciente nao encontrado para este usuario' })
     }
 
+    const pinnedForm = await resolvePublishedVersionForSchedule({
+      userId,
+      specialtyCode: agenda.specialtyCode,
+      formTemplateId: agenda.formTemplateId,
+    })
+
     const consultation = await prisma.$transaction(async (tx) => {
       const created = await tx.consultation.create({
         data: {
           userId,
           patientId: patient.id,
           scheduleId: agenda.id,
+          specialtyCode: agenda.specialtyCode,
+          formMode: pinnedForm ? 'dynamic' : 'legacy',
+          formTemplateVersionId: pinnedForm?.version.id || null,
+          formDefinitionSnapshot: pinnedForm?.version.definitionJson || null,
+          formPinnedAt: pinnedForm ? new Date() : null,
           status: CONSULTATION_STATUS.WAITING,
           scheduledAt: requestedAt,
         },

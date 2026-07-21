@@ -1,7 +1,9 @@
 import OpenAI from 'openai'
-import { createReadStream } from 'fs'
-import { writeFile, mkdir } from 'fs/promises'
+import { randomUUID } from 'crypto'
+import { toFile } from 'openai/uploads'
+import { writeFile, mkdir, readFile, unlink } from 'fs/promises'
 import path from 'path'
+import { protectAudioBuffer, revealAudioBuffer } from './sensitive-data.service'
 
 let _openai: OpenAI | null = null
 const getOpenAI = () => {
@@ -10,6 +12,15 @@ const getOpenAI = () => {
 }
 
 const UPLOADS_DIR = path.resolve(__dirname, '../../uploads/audio')
+
+function resolveStoredAudioPath(filePath: string) {
+  const resolved = path.resolve(filePath)
+  const relative = path.relative(UPLOADS_DIR, resolved)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('Caminho de audio fora da area permitida')
+  }
+  return resolved
+}
 
 export async function ensureUploadsDir() {
   await mkdir(UPLOADS_DIR, { recursive: true })
@@ -73,25 +84,21 @@ function isHallucination(text: string, segment?: WhisperSegment): boolean {
 }
 
 const WHISPER_CONTEXT_PROMPT =
-  'Transcrição de uma consulta médica em português do Brasil. ' +
-  'Conversa entre médico e paciente sobre sintomas, história clínica, exame físico, diagnóstico e conduta.'
+  'Transcrição de uma consulta clínica ou psicológica em português do Brasil. ' +
+  'Preserve literalmente a conversa entre profissional, paciente e eventuais participantes.'
 
 export async function transcribeAudioBuffer(
   audioBuffer: Buffer,
   mimeType: string = 'audio/webm'
 ): Promise<string> {
   const ext = mimeType.includes('webm') ? 'webm' : 'mp3'
-  const tmpPath = path.join(UPLOADS_DIR, `tmp_${Date.now()}.${ext}`)
-
-  await ensureUploadsDir()
-  await writeFile(tmpPath, audioBuffer)
 
   try {
     const model = (process.env.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1') as string
     const useSegments = model.includes('whisper') // só whisper-1 suporta verbose_json
 
     const transcription = await getOpenAI().audio.transcriptions.create({
-      file: createReadStream(tmpPath),
+      file: await toFile(audioBuffer, `segmento.${ext}`, { type: mimeType }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       model: model as any,
       language: 'pt',
@@ -108,7 +115,7 @@ export async function transcribeAudioBuffer(
       const kept: string[] = []
       for (const seg of segments) {
         if (isHallucination(seg.text, seg)) {
-          console.log(`[speech] Descartado (alucinação): "${seg.text.trim()}"`)
+          console.info('[speech] Segmento descartado por baixa confianca ou padrao de alucinacao')
           continue
         }
         kept.push(seg.text.trim())
@@ -120,14 +127,11 @@ export async function transcribeAudioBuffer(
       clean = isHallucination(raw) ? '' : raw.trim()
     }
 
-    if (clean) console.log(`[speech] Transcrito: "${clean.slice(0, 80)}"`)
+    if (clean) console.info('[speech] Transcricao concluida', { characterCount: clean.length })
     return clean
   } catch (err) {
     console.error('[speech] Erro na transcrição:', err)
     throw err
-  } finally {
-    const { unlink } = await import('fs/promises')
-    await unlink(tmpPath).catch(() => {})
   }
 }
 
@@ -135,11 +139,23 @@ export async function saveFullAudio(
   consultationId: string,
   audioBuffer: Buffer,
   mimeType: string = 'audio/webm'
-): Promise<string> {
+): Promise<{ filePath: string; encrypted: boolean }> {
   await ensureUploadsDir()
   const ext = mimeType.includes('webm') ? 'webm' : 'mp3'
-  const filename = `${consultationId}_${Date.now()}.${ext}`
+  const protectedAudio = protectAudioBuffer(audioBuffer)
+  const filename = `${consultationId}_${Date.now()}_${randomUUID()}.${ext}${protectedAudio.encrypted ? '.enc' : ''}`
   const filePath = path.join(UPLOADS_DIR, filename)
-  await writeFile(filePath, audioBuffer)
-  return filePath
+  await writeFile(filePath, protectedAudio.data)
+  return { filePath, encrypted: protectedAudio.encrypted }
+}
+
+export async function readFullAudio(filePath: string) {
+  return revealAudioBuffer(await readFile(resolveStoredAudioPath(filePath)))
+}
+
+export async function removeStoredAudio(filePath: string) {
+  const resolved = resolveStoredAudioPath(filePath)
+  await unlink(resolved).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+  })
 }

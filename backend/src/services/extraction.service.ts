@@ -836,17 +836,23 @@ function validateEvidence(
   return evidence.flatMap((item) => {
     const quote = item.quote.trim()
     if (!quote) return []
+    const normalizedQuote = normalize(quote)
+    if (!normalizedQuote) return []
+
     const direct = known.get(item.segmentId)
-    if (direct && direct.sequence === item.sequence) {
+    if (
+      direct &&
+      direct.sequence === item.sequence &&
+      normalize(direct.text).includes(normalizedQuote)
+    ) {
       return [{ ...item, quote }]
     }
 
-    const normalizedQuote = normalize(quote)
     const bySequence = segments.find((segment) =>
       segment.sequence === item.sequence && normalize(segment.text).includes(normalizedQuote)
     )
     const byQuote = segments.find((segment) => normalize(segment.text).includes(normalizedQuote))
-    const fallback = bySequence || byQuote || (segments.length === 1 ? segments[0] : undefined)
+    const fallback = bySequence || byQuote
     return fallback
       ? [{ segmentId: fallback.id, sequence: fallback.sequence, quote }]
       : []

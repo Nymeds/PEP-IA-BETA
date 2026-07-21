@@ -9,6 +9,7 @@ import {
   verifyPassword,
 } from '../lib/auth'
 import { getDefaultSettingsPayload } from '../lib/schedule'
+import { ensurePsychologyTemplateForUser } from '../services/form-templates.service'
 
 interface RegisterBody {
   email?: string
@@ -82,6 +83,14 @@ export async function registerUser(
       },
       select: { id: true, email: true, name: true, suggestedName: true },
     })
+
+    // O cadastro nao deve falhar por uma indisponibilidade transitória do seed;
+    // a listagem de formularios repete esta operacao de forma idempotente.
+    try {
+      await ensurePsychologyTemplateForUser(user.id)
+    } catch (seedError) {
+      console.error('[formularios] Nao foi possivel criar o preset inicial:', seedError)
+    }
 
     const token = signJwt(user)
     setAuthCookie(reply, req, token)

@@ -1,10 +1,10 @@
 import { AppLayout } from '@/components/layout/AppLayout'
-import { AgendasSettingsManager } from '@/components/settings/AgendasSettingsManager'
+import { SettingsWorkspace } from '@/components/settings/SettingsWorkspace'
 
 export default function SettingsPage() {
   return (
     <AppLayout>
-      <AgendasSettingsManager />
+      <SettingsWorkspace />
     </AppLayout>
   )
 }

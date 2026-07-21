@@ -38,6 +38,7 @@ async function main() {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'smoke-test-secret-com-mais-de-32-caracteres'
   process.env.FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3001'
   process.env.PORT = process.env.PORT || '0'
+  process.env.DYNAMIC_FORMS_PSYCHOLOGY = 'true'
 
   if (process.platform === 'win32') {
     execFileSync('cmd.exe', ['/d', '/s', '/c', 'npm run db:push'], {
@@ -148,6 +149,97 @@ async function main() {
     assert(login.statusCode === 200, `Login falhou com status ${login.statusCode}`)
     cookie = getCookieFromHeaders(login.headers['set-cookie'])
 
+    logStep('listar preset dinamico de Psicologia')
+    const formTemplates = await server.inject({
+      method: 'GET',
+      url: '/api/form-templates?specialtyCode=psicologia&status=publicado',
+      headers: { cookie },
+    })
+    assert(formTemplates.statusCode === 200, `Listagem de formularios falhou com ${formTemplates.statusCode}`)
+    const formTemplatesBody = parseJson<{
+      items: Array<{
+        id: string
+        isDefault: boolean
+        draftDefinition: Record<string, unknown>
+        latestVersion: { id: string; version: number } | null
+      }>
+    }>(formTemplates.payload)
+    assert(formTemplatesBody.items.length === 1, 'O usuario deve receber um preset de Psicologia')
+    assert(formTemplatesBody.items[0].isDefault, 'O preset inicial deve ser o formulario padrao')
+    assert(formTemplatesBody.items[0].latestVersion?.version === 1, 'O preset deve nascer publicado na versao 1')
+    const psychologyTemplateId = formTemplatesBody.items[0].id
+
+    logStep('copiar e publicar formulario dinamico')
+    const copiedForm = await server.inject({
+      method: 'POST',
+      url: `/api/form-templates/${psychologyTemplateId}/copy`,
+      headers: { cookie },
+      payload: { name: 'Formulario Psicologia Personalizado' },
+    })
+    assert(copiedForm.statusCode === 201, `Copia do formulario falhou com ${copiedForm.statusCode}`)
+    const copiedFormBody = parseJson<{
+      template: { id: string; status: string; draftDefinition: Record<string, unknown> }
+    }>(copiedForm.payload)
+    assert(copiedFormBody.template.status === 'rascunho', 'A copia deve nascer como rascunho')
+
+    const publishCopiedForm = await server.inject({
+      method: 'POST',
+      url: `/api/form-templates/${copiedFormBody.template.id}/publish`,
+      headers: { cookie },
+    })
+    assert(publishCopiedForm.statusCode === 201, `Publicacao do formulario falhou com ${publishCopiedForm.statusCode}`)
+
+    const setCopiedAsDefault = await server.inject({
+      method: 'POST',
+      url: `/api/form-templates/${copiedFormBody.template.id}/default`,
+      headers: { cookie },
+    })
+    assert(setCopiedAsDefault.statusCode === 200, `Definicao do formulario padrao falhou com ${setCopiedAsDefault.statusCode}`)
+
+    const archiveDefaultForm = await server.inject({
+      method: 'POST',
+      url: `/api/form-templates/${copiedFormBody.template.id}/archive`,
+      headers: { cookie },
+    })
+    assert(archiveDefaultForm.statusCode === 400, 'O formulario padrao nao deve poder ser arquivado')
+
+    logStep('publicacao deve bloquear ausencia de papel documental obrigatorio')
+    const invalidCopy = await server.inject({
+      method: 'POST',
+      url: `/api/form-templates/${psychologyTemplateId}/copy`,
+      headers: { cookie },
+      payload: { name: 'Formulario Incompleto' },
+    })
+    assert(invalidCopy.statusCode === 201, `Copia para validacao falhou com ${invalidCopy.statusCode}`)
+    const invalidCopyBody = parseJson<{
+      template: {
+        id: string
+        draftDefinition: {
+          documents: Array<{ tabs: Array<{ elements: Array<{ semanticRole?: string }> }> }>
+        }
+      }
+    }>(invalidCopy.payload)
+    const documentField = invalidCopyBody.template.draftDefinition.documents
+      .flatMap((document) => document.tabs)
+      .flatMap((tab) => tab.elements)
+      .find((field) => field.semanticRole === 'documentos_emitidos')
+    assert(documentField, 'O preset deveria conter o papel documentos_emitidos')
+    delete documentField.semanticRole
+
+    const saveInvalidDraft = await server.inject({
+      method: 'PATCH',
+      url: `/api/form-templates/${invalidCopyBody.template.id}`,
+      headers: { cookie },
+      payload: { draftDefinition: invalidCopyBody.template.draftDefinition },
+    })
+    assert(saveInvalidDraft.statusCode === 200, 'O rascunho incompleto deve poder ser salvo')
+    const publishInvalidDraft = await server.inject({
+      method: 'POST',
+      url: `/api/form-templates/${invalidCopyBody.template.id}/publish`,
+      headers: { cookie },
+    })
+    assert(publishInvalidDraft.statusCode === 422, 'A publicacao incompleta deve ser bloqueada com 422')
+
     logStep('listar pacientes vazio')
     const emptyPatients = await server.inject({
       method: 'GET',
@@ -210,6 +302,32 @@ async function main() {
     assert(createSecondAgenda.statusCode === 201, `Criacao da segunda agenda falhou com ${createSecondAgenda.statusCode}`)
     const secondaryAgendaId = parseJson<{ agenda: { id: string } }>(createSecondAgenda.payload).agenda.id
 
+    logStep('criacao de agenda de Psicologia com formulario dinamico')
+    const createPsychologyAgenda = await server.inject({
+      method: 'POST',
+      url: '/api/schedule/agendas',
+      headers: { cookie },
+      payload: {
+        title: 'Agenda Psicologia',
+        specialty: 'Psicologia',
+        specialtyCode: 'psicologia',
+        formTemplateId: copiedFormBody.template.id,
+        status: 'ativa',
+        activeWeekDays: [1, 2, 3, 4, 5],
+        workOnHolidays: false,
+        appointmentDurationMinutes: 30,
+        shifts: [
+          { id: 'manha', label: 'Manha', enabled: true, start: '08:00', end: '10:00', slots: 4 },
+          { id: 'tarde', label: 'Tarde', enabled: false, start: '13:00', end: '15:00', slots: 0 },
+          { id: 'noite', label: 'Noite', enabled: false, start: '18:00', end: '21:00', slots: 0 },
+        ],
+      },
+    })
+    assert(createPsychologyAgenda.statusCode === 201, `Criacao da agenda de Psicologia falhou com ${createPsychologyAgenda.statusCode}`)
+    const psychologyAgendaId = parseJson<{
+      agenda: { id: string; specialtyCode: string; formTemplateId: string }
+    }>(createPsychologyAgenda.payload).agenda.id
+
     logStep('atualizacao invalida da agenda deve retornar 400')
     const invalidSchedule = await server.inject({
       method: 'PUT',
@@ -259,9 +377,13 @@ async function main() {
       headers: { cookie },
       payload: {
         notes: 'Paciente atualizado pelo smoke test',
+        userId: 'proprietario-forjado',
+        consultations: { deleteMany: {} },
       },
     })
     assert(updatePatient.statusCode === 200, `Edicao de paciente falhou com ${updatePatient.statusCode}`)
+    const updatedPatient = parseJson<JsonValue>(updatePatient.payload)
+    assert(updatedPatient.userId !== 'proprietario-forjado', 'Atualizacao de paciente aceitou troca de proprietario')
 
     const nextMonday = new Date()
     while (nextMonday.getDay() !== 1) {
@@ -279,9 +401,10 @@ async function main() {
     assert(slots.statusCode === 200, `Listagem de slots falhou com ${slots.statusCode}`)
     const slotsBody = parseJson<{ allowed: boolean; slots: Array<{ isoDateTime: string }> }>(slots.payload)
     assert(slotsBody.allowed, 'O dia de teste deveria estar permitido na agenda')
-    assert(slotsBody.slots.length > 1, 'A agenda de teste deveria gerar pelo menos dois slots')
+    assert(slotsBody.slots.length > 2, 'A agenda de teste deveria gerar pelo menos tres slots')
     const firstSlot = slotsBody.slots[0].isoDateTime
     const secondSlot = slotsBody.slots[1].isoDateTime
+    const thirdSlot = slotsBody.slots[2].isoDateTime
 
     logStep('agendamento rapido com cadastro minimo pela agenda')
     const quickBook = await server.inject({
@@ -326,6 +449,27 @@ async function main() {
       `Conflito entre agendas deveria falhar com 409, recebido ${crossAgendaConflict.statusCode}`
     )
 
+    logStep('agendamento de Psicologia deve fixar a versao publicada')
+    const dynamicQuickBook = await server.inject({
+      method: 'POST',
+      url: `/api/schedule/agendas/${psychologyAgendaId}/quick-book`,
+      headers: { cookie },
+      payload: {
+        patientName: 'Paciente Psicologia',
+        scheduledAt: thirdSlot,
+      },
+    })
+    assert(dynamicQuickBook.statusCode === 201, `Agendamento dinamico falhou com ${dynamicQuickBook.statusCode}`)
+    const dynamicQuickBookBody = parseJson<{
+      id: string
+      formMode: string
+      formTemplateVersionId: string | null
+      formDefinitionSnapshot: string | null
+    }>(dynamicQuickBook.payload)
+    assert(dynamicQuickBookBody.formMode === 'dynamic', 'A consulta de Psicologia deve usar o motor dinamico')
+    assert(Boolean(dynamicQuickBookBody.formTemplateVersionId), 'A versao do formulario deve ser fixada no agendamento')
+    assert(Boolean(dynamicQuickBookBody.formDefinitionSnapshot), 'A definicao publicada deve ser copiada para a consulta')
+
     logStep('dashboard de agendas')
     const calendarMonth = firstSlot.slice(0, 7)
     const dashboard = await server.inject({
@@ -334,6 +478,27 @@ async function main() {
       headers: { cookie },
     })
     assert(dashboard.statusCode === 200, `Dashboard de agendas falhou com ${dashboard.statusCode}`)
+
+    const psychologyCalendar = await server.inject({
+      method: 'GET',
+      url: `/api/schedule/agendas/${psychologyAgendaId}/calendar?month=${calendarMonth}`,
+      headers: { cookie },
+    })
+    assert(psychologyCalendar.statusCode === 200, `Calendario de Psicologia falhou com ${psychologyCalendar.statusCode}`)
+    const psychologyCalendarBody = parseJson<{
+      appointments: Array<{
+        formTemplateName?: string | null
+        formVersion?: number | null
+        consentStatus?: string | null
+        aiReady?: boolean
+      }>
+    }>(psychologyCalendar.payload)
+    const pinnedAppointment = psychologyCalendarBody.appointments.find(
+      (appointment) => Boolean(appointment.formTemplateName && appointment.formVersion)
+    )
+    assert(Boolean(pinnedAppointment), 'A agenda deve informar nome e versao pinada do formulario')
+    assert(pinnedAppointment?.consentStatus === 'pendente', 'Consentimento inicial deveria aparecer como pendente')
+    assert(pinnedAppointment?.aiReady === false, 'IA nao deveria aparecer pronta antes dos consentimentos')
 
     logStep('calendario mensal da agenda principal')
     const calendar = await server.inject({
@@ -409,9 +574,17 @@ async function main() {
       method: 'PUT',
       url: `/api/consultations/${quickBookBody.id}`,
       headers: { cookie },
-      payload: { chiefComplaint: 'Cefaleia leve' },
+      payload: {
+        chiefComplaint: 'Cefaleia leve',
+        audioPath: 'C:\\Windows\\win.ini',
+        formMode: 'dynamic',
+        formTemplateVersionId: 'versao-forjada',
+      },
     })
     assert(updateConsultation.statusCode === 200, `Edicao de consulta falhou com ${updateConsultation.statusCode}`)
+    const updatedConsultation = parseJson<JsonValue>(updateConsultation.payload)
+    assert(updatedConsultation.formMode === 'legacy', 'Atualizacao legada aceitou forjar o motor do formulario')
+    assert(!updatedConsultation.audioPath, 'Atualizacao legada aceitou forjar o caminho do audio')
 
     logStep('criar segunda consulta em outro horario para o mesmo medico')
     const secondQuickBook = await server.inject({
@@ -506,6 +679,76 @@ async function main() {
       closeSecondConsultation.statusCode === 200,
       `Encerramento da segunda consulta falhou com ${closeSecondConsultation.statusCode}`
     )
+
+    logStep('consulta dinamica manual deve finalizar sem consentimento de audio ou IA')
+    const startDynamicConsultation = await server.inject({
+      method: 'POST',
+      url: `/api/consultations/${dynamicQuickBookBody.id}/start`,
+      headers: { cookie },
+    })
+    assert(startDynamicConsultation.statusCode === 200, `Inicio dinamico manual falhou com ${startDynamicConsultation.statusCode}`)
+
+    const dynamicRuntime = await server.inject({
+      method: 'GET',
+      url: `/api/consultations/${dynamicQuickBookBody.id}/runtime`,
+      headers: { cookie },
+    })
+    assert(dynamicRuntime.statusCode === 200, `Runtime dinamico falhou com ${dynamicRuntime.statusCode}`)
+
+    const manualDocument = await server.inject({
+      method: 'POST',
+      url: `/api/consultations/${dynamicQuickBookBody.id}/generated-documents`,
+      headers: { cookie },
+      payload: {
+        format: 'SOAP',
+        documentKind: 'compartilhavel',
+        manualContent: {
+          sections: [
+            { key: 'subjetivo', title: 'Subjetivo', content: 'Registro manual do relato.', evidenceSegmentIds: [] },
+            { key: 'objetivo', title: 'Objetivo', content: 'Registro manual das observacoes.', evidenceSegmentIds: [] },
+            { key: 'avaliacao', title: 'Avaliacao', content: 'Avaliacao revisada pelo profissional.', evidenceSegmentIds: [] },
+            { key: 'plano', title: 'Plano', content: 'Plano registrado manualmente.', evidenceSegmentIds: [] },
+          ],
+          warnings: [],
+        },
+      },
+    })
+    assert(manualDocument.statusCode === 201, `Rascunho manual falhou com ${manualDocument.statusCode}`)
+    const manualDocumentBody = parseJson<{ id: string; source: string }>(manualDocument.payload)
+    assert(manualDocumentBody.source === 'manual', 'O documento manual precisa manter sua proveniencia')
+
+    const confirmManualDocument = await server.inject({
+      method: 'PATCH',
+      url: `/api/consultations/${dynamicQuickBookBody.id}/generated-documents/${manualDocumentBody.id}/confirm`,
+      headers: { cookie },
+      payload: {},
+    })
+    assert(confirmManualDocument.statusCode === 200, `Confirmacao manual falhou com ${confirmManualDocument.statusCode}`)
+
+    logStep('feature flag deve bloquear todas as rotas dinamicas')
+    process.env.DYNAMIC_FORMS_PSYCHOLOGY = 'false'
+    try {
+      const disabledForms = await server.inject({
+        method: 'GET',
+        url: '/api/form-templates',
+        headers: { cookie },
+      })
+      assert(disabledForms.statusCode === 404, 'Gerenciador dinamico deveria respeitar a feature flag')
+      const disabledRuntime = await server.inject({
+        method: 'GET',
+        url: `/api/consultations/${dynamicQuickBookBody.id}/runtime`,
+        headers: { cookie },
+      })
+      assert(disabledRuntime.statusCode === 404, 'Runtime dinamico deveria respeitar a feature flag')
+      const disabledStart = await server.inject({
+        method: 'POST',
+        url: `/api/consultations/${dynamicQuickBookBody.id}/start`,
+        headers: { cookie },
+      })
+      assert(disabledStart.statusCode === 409, 'Motor dinamico deveria recusar inicio com a feature flag desligada')
+    } finally {
+      process.env.DYNAMIC_FORMS_PSYCHOLOGY = 'true'
+    }
 
     logStep('segundo usuario nao deve acessar dados do primeiro')
     const secondRegister = await server.inject({

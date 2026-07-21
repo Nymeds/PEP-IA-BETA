@@ -3,6 +3,7 @@ import { defineConfig, devices } from '@playwright/test'
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
+  workers: process.env.CI ? 2 : 3,
   retries: process.env.CI ? 2 : 0,
   reporter: 'list',
   use: {
@@ -20,5 +21,8 @@ export default defineConfig({
     url: 'http://127.0.0.1:3001',
     reuseExistingServer: true,
     timeout: 120_000,
+    env: {
+      NEXT_PUBLIC_DYNAMIC_FORMS_PSYCHOLOGY: 'true',
+    },
   },
 })

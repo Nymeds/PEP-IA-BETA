@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
+  await page.context().addCookies([
+    { name: 'pep_token', value: 'e2e-token', url: 'http://127.0.0.1:3001' },
+  ])
   await page.route('**/api/auth/me', (route) => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({ user: { id: 'doctor-1', email: 'medico@teste.local', name: 'Médico', suggestedName: 'Dr(a). Teste' } }),
