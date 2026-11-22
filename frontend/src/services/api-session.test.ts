@@ -44,4 +44,34 @@ describe('privacidade do cliente HTTP', () => {
     expect(listener).toHaveBeenCalledOnce()
     window.removeEventListener(SESSION_EXPIRED_EVENT, listener)
   })
+
+  it('preserva o payload estruturado de conflito ao iniciar uma consulta', async () => {
+    const payload = {
+      error: 'Já existe outra consulta em andamento para este médico',
+      code: 'ACTIVE_CONSULTATION_EXISTS',
+      activeConsultation: {
+        id: 'consulta-ativa',
+        patientName: 'Paciente em atendimento',
+        startedAt: '2026-07-22T22:42:44.359Z',
+        scheduleTitle: 'Agenda Clínica Geral',
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      statusText: 'Conflict',
+      headers: { get: () => 'request-409' },
+      json: async () => payload,
+    }))
+
+    const error = await api.consultations.start('consulta-em-espera').catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({
+      status: 409,
+      code: 'ACTIVE_CONSULTATION_EXISTS',
+      requestId: 'request-409',
+      payload,
+    })
+  })
 })

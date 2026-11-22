@@ -17,16 +17,13 @@ import {
 } from 'lucide-react'
 import { useSession } from '@/components/providers/SessionProvider'
 import { usePersistentState } from '@/hooks/usePersistentState'
-import { dynamicPsychologyFormsEnabled } from '@/lib/features'
 import { cn } from '../shared/utils'
 
 const NAV = [
   { href: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { href: '/patients', icon: Users, label: 'Pacientes' },
   { href: '/settings', icon: CalendarDays, label: 'Agendas' },
-  ...(dynamicPsychologyFormsEnabled
-    ? [{ href: '/formularios', icon: Wrench, label: 'Meu formulário' }]
-    : []),
+  { href: '/formularios', icon: Wrench, label: 'Formulários' },
 ]
 
 function isActivePath(pathname: string, href: string) {

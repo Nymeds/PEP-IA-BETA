@@ -2,14 +2,6 @@ import {
   AuthUser,
   CalendarAppointment,
   Consultation,
-  ClinicalTemplateId,
-  ConsultationVersion,
-  ConversationTopic,
-  DeltaExtractionResult,
-  ExtractedData,
-  FieldProvenance,
-  ClinicalSuggestion,
-  FinalizeResponse,
   Patient,
   PatientListResponse,
   PatientSummary,
@@ -24,26 +16,39 @@ import {
   ScheduleSlotsResponse,
   RealtimeClientSecretResponse,
   RealtimeTranscriptAppendResponse,
-  RawTranscriptResponse,
   TranscribeResponse,
 } from '@/types'
 import { notifySessionExpired } from './client-session'
 
 export const BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
 
+export interface ApiErrorPayload {
+  error?: string
+  message?: string
+  code?: string
+  requestId?: string
+  [key: string]: unknown
+}
+
 export class ApiError extends Error {
   status: number
   code?: string
   requestId?: string
   retryable: boolean
+  payload?: ApiErrorPayload
 
-  constructor(message: string, status: number, options?: { code?: string; requestId?: string }) {
+  constructor(
+    message: string,
+    status: number,
+    options?: { code?: string; requestId?: string; payload?: ApiErrorPayload }
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = options?.code
     this.requestId = options?.requestId
     this.retryable = status === 408 || status === 429 || status >= 500
+    this.payload = options?.payload
   }
 }
 
@@ -59,10 +64,11 @@ function buildUrl(path: string, query?: Record<string, string | number | undefin
 
 async function parseError(res: Response, notifyAuthenticationFailure = true): Promise<never> {
   if (res.status === 401 && notifyAuthenticationFailure) notifySessionExpired()
-  const err = await res.json().catch(() => ({ error: res.statusText }))
+  const err = await res.json().catch(() => ({ error: res.statusText })) as ApiErrorPayload
   throw new ApiError(err.message || err.error || 'Não foi possível concluir a solicitação', res.status, {
     code: err.code,
     requestId: res.headers.get('x-request-id') || err.requestId,
+    payload: err,
   })
 }
 
@@ -187,26 +193,9 @@ export const api = {
   },
 
   consultations: {
-    create: (patientId: string, scheduledAt?: string) =>
-      request<Consultation>('/api/consultations', {
-        method: 'POST',
-        body: JSON.stringify({ patientId, scheduledAt }),
-      }),
     start: (id: string) =>
       request<Consultation>(`/api/consultations/${id}/start`, { method: 'POST' }),
     get: (id: string) => request<Consultation>(`/api/consultations/${id}`),
-    update: (
-      id: string,
-      data: Partial<Consultation> & { manualFields?: (keyof Consultation)[] }
-    ) =>
-      request<Consultation>(`/api/consultations/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    close: (id: string) =>
-      request<Consultation>(`/api/consultations/${id}/close`, { method: 'POST' }),
-    listByPatient: (patientId: string) =>
-      request<Consultation[]>(`/api/consultations/patient/${patientId}`),
 
     transcribeChunk: async (id: string, audioBlob: Blob): Promise<TranscribeResponse> => {
       const formData = new FormData()
@@ -235,39 +224,6 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
-    rawTranscript: (id: string) =>
-      request<RawTranscriptResponse>(`/api/consultations/${id}/raw-transcript`),
-
-    reinterpret: async (id: string, options?: { force?: boolean }): Promise<DeltaExtractionResult> => {
-      const res = await fetch(buildUrl(`/api/consultations/${id}/reinterpret`), {
-        method: 'POST',
-        headers: options ? { 'Content-Type': 'application/json' } : undefined,
-        body: options ? JSON.stringify(options) : undefined,
-        credentials: 'include',
-        cache: 'no-store',
-      })
-      if (!res.ok) return parseError(res)
-      return res.json()
-    },
-
-    updateAiState: (
-      id: string,
-      data: {
-        action?: 'accept' | 'dismiss'
-        suggestionId?: string
-        field?: keyof ExtractedData
-        templateId?: ClinicalTemplateId
-      }
-    ) =>
-      request<{
-        templateId: ClinicalTemplateId
-        fieldMeta: Record<string, FieldProvenance>
-        suggestions: ClinicalSuggestion[]
-      }>(`/api/consultations/${id}/ai-state`, {
-        method: 'PATCH',
-        body: JSON.stringify(data),
-      }),
-
     saveAudio: async (id: string, audioBlob: Blob): Promise<{ audioPath: string }> => {
       const formData = new FormData()
       formData.append('audio', audioBlob, 'recording.webm')
@@ -281,26 +237,7 @@ export const api = {
       return res.json()
     },
 
-    finalize: (id: string) =>
-      request<FinalizeResponse>(`/api/consultations/${id}/finalize`, { method: 'POST', timeoutMs: 120_000 }),
-
     audioUrl: (id: string) => `${BASE}/api/consultations/${id}/audio-file`,
-
-    topics: (id: string) =>
-      request<{ topics: ConversationTopic[] }>(`/api/consultations/${id}/topics`, { method: 'GET' }),
-
-    createVersion: (
-      id: string,
-      newTranscript: string,
-      reason?: string,
-      editDiff?: { before: string; after: string }
-    ) =>
-      request<{ consultation: Consultation; extracted: ExtractedData; savedVersion: number }>(
-        `/api/consultations/${id}/versions`,
-        { method: 'POST', body: JSON.stringify({ newTranscript, reason, editDiff }) }
-      ),
-
-    listVersions: (id: string) => request<ConsultationVersion[]>(`/api/consultations/${id}/versions`),
   },
 
   schedule: {

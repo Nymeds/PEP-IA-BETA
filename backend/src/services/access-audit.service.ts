@@ -3,7 +3,7 @@ import { getPrisma } from '../lib/prisma'
 export async function recordSensitiveAccess(input: {
   actorUserId: string
   consultationId?: string | null
-  dataClass: 'audio_consulta' | 'transcricao_consulta' | 'prontuario_compartilhavel' | 'registro_psicologico_restrito'
+  dataClass: 'audio_consulta' | 'transcricao_consulta' | 'prontuario_compartilhavel' | 'registro_clinico_restrito'
   action: string
   requestId?: string | null
 }) {

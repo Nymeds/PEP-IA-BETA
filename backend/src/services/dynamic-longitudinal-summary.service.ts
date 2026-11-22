@@ -3,7 +3,7 @@ import { createStructuredResponse } from './openai-responses.service'
 
 export interface DynamicLongitudinalRecord {
   date: string
-  source: 'legacy' | 'dynamic'
+  source: 'dynamic'
   templateVersionId?: string | null
   sharedFields: Array<{
     id: string
@@ -44,19 +44,19 @@ export async function summarizeDynamicLongitudinalRecord(input: {
     input.records.map((record) => record.templateVersionId || record.source)
   )).sort().join(':')
   const promptCacheKey = createHash('sha256')
-    .update(`psychology-longitudinal:${input.ownerId}:${versionKey}`)
+    .update(`clinical-longitudinal:${input.ownerId}:${versionKey}`)
     .digest('hex')
 
   const response = await createStructuredResponse<DynamicLongitudinalSummary>({
     model: process.env.OPENAI_DYNAMIC_FINAL_MODEL || 'gpt-5.6-sol',
     reasoningEffort: 'medium',
-    instructions: `Voce produz uma sintese longitudinal cautelosa, em pt-BR, para revisao do psicologo.
+    instructions: `Voce produz uma sintese longitudinal cautelosa, em pt-BR, para revisao do profissional de saude.
 Use somente os campos do prontuario compartilhavel recebidos. Conteudo do registro restrito, transcript e audio nunca sao fornecidos.
 Nao diagnostique, nao prescreva, nao transforme hipotese em fato e nao invente continuidade entre sessoes.
 Preserve datas, incertezas, negacoes e fonte. "recommendations" significa pontos documentais a revisar, nunca conduta autonoma.
 Retorne somente o objeto definido no schema.`,
     input: { records: input.records },
-    schemaName: 'psychology_longitudinal_shared_summary',
+    schemaName: 'clinical_longitudinal_shared_summary',
     schemaDescription: 'Resumo longitudinal baseado apenas no prontuario compartilhavel',
     schema: SUMMARY_SCHEMA,
     maxOutputTokens: 2600,

@@ -95,8 +95,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, [clearPrivateClientState, router])
 
   useEffect(() => {
+    if (isPublicPath(pathname)) {
+      applySessionUser(null)
+      setIsLoading(false)
+      return
+    }
+
     void refreshSession()
-  }, [refreshSession])
+  }, [applySessionUser, pathname, refreshSession])
 
   useEffect(() => {
     if (isLoading) return

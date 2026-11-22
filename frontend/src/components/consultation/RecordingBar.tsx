@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CloudOff, Loader2, Mic, Radio, Sparkles, Square } from 'lucide-react'
+import { CloudOff, Loader2, Mic, Radio, ShieldCheck, Sparkles, Square } from 'lucide-react'
 import { RecordingState, TranscriptionMode } from '@/hooks/useRealtimeTranscription'
 import { cn } from '../shared/utils'
 
@@ -13,6 +13,7 @@ interface Props {
   isInterpreting?: boolean
   disabled?: boolean
   disabledReason?: string
+  onPrepare?: () => void
   onStart: () => void
   onStop: () => void
 }
@@ -31,6 +32,7 @@ export function RecordingBar({
   isInterpreting,
   disabled,
   disabledReason,
+  onPrepare,
   onStart,
   onStop,
 }: Props) {
@@ -74,7 +76,15 @@ export function RecordingBar({
           <span className={cn('h-2 w-2 shrink-0 rounded-full', isRecording ? 'animate-pulse bg-red-500' : isProcessing ? 'bg-amber-500' : 'bg-slate-300')} />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
-              <span className="font-semibold text-slate-900">{isRecording ? `Gravando ${formatDuration(elapsed)}` : isProcessing ? 'Processando áudio' : 'Gravação pronta'}</span>
+              <span className="font-semibold text-slate-900">
+                {isRecording
+                  ? `Gravando ${formatDuration(elapsed)}`
+                  : isProcessing
+                    ? 'Processando áudio'
+                    : startDisabled
+                      ? 'Gravação bloqueada'
+                      : 'Gravação pronta'}
+              </span>
               {isRecording ? (
                 <span className={cn('inline-flex items-center gap-1 font-medium', transcriptionMode === 'local' ? 'text-amber-700' : 'text-emerald-700')}>
                   {transcriptionMode === 'local' ? <CloudOff className="h-3.5 w-3.5" /> : <Radio className="h-3.5 w-3.5" />}
@@ -90,6 +100,17 @@ export function RecordingBar({
             </p>
           </div>
         </div>
+
+        {startDisabled && onPrepare ? (
+          <button
+            type="button"
+            onClick={onPrepare}
+            className="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-900 transition-colors hover:border-amber-400 hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+            Registrar consentimentos
+          </button>
+        ) : null}
 
         <button
           type="button"

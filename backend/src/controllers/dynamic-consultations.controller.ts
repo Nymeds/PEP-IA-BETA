@@ -4,6 +4,10 @@ import { Prisma } from '@prisma/client'
 import { getPrisma } from '../lib/prisma'
 import { CONSULTATION_STATUS, normalizeConsultationStatus } from '../lib/schedule'
 import {
+  consentWasGrantedAt,
+  estimateDialogueTurnOccurredAt,
+} from '../lib/dynamic-consent-timeline'
+import {
   ClinicalFormDefinition,
   FormRuntimeManifest,
   buildRuntimeManifest,
@@ -13,18 +17,26 @@ import {
   DynamicFieldUpdate,
   DynamicTranscriptSegment,
   GeneratedDocumentFormat,
+  canUseSegmentForFinalDocumentDraft,
   extractDynamicFormDelta,
   generateDynamicClinicalDocument,
   suggestDynamicConversationTopics,
   validateDynamicFieldValue,
 } from '../services/dynamic-clinical-ai.service'
 import { findMedicationReference } from '../services/medication-reference.service'
-import { DialogueTurn, diarizeAudio } from '../services/review.service'
+import {
+  AUTOMATIC_SPEAKER_ROLE_MIN_CONFIDENCE,
+  DialogueTurn,
+  diarizeAudio,
+  diarizeTranscript,
+} from '../services/review.service'
+import { staleAiValuesAfterFullReconciliation } from '../services/dynamic-ai-reconciliation.service'
 import { protectSensitiveText, revealSensitiveText } from '../services/sensitive-data.service'
 import { recordSensitiveAccess } from '../services/access-audit.service'
 
-const CONSENT_TERMS_VERSION = 'psychology-ai-consent-v1'
+const CONSENT_TERMS_VERSION = 'clinical-ai-consent-v1'
 const DYNAMIC_AI_PROCESSING_LEASE_MS = 60_000
+const DYNAMIC_INCREMENTAL_CONTEXT_SEGMENTS = 12
 const PARTICIPANT_ROLES = new Set([
   'profissional',
   'paciente',
@@ -34,10 +46,6 @@ const PARTICIPANT_ROLES = new Set([
   'interprete',
   'outro',
 ])
-
-function dynamicFormsEnabled() {
-  return process.env.DYNAMIC_FORMS_PSYCHOLOGY !== 'false'
-}
 
 class RevisionConflictError extends Error {}
 class FormVersionConflictError extends Error {}
@@ -69,6 +77,10 @@ const BLOCKING_QUARANTINE_KINDS = new Set([
   'consentimento_revogado',
 ])
 
+function quarantineBlocksFinalization(kind: string) {
+  return BLOCKING_QUARANTINE_KINDS.has(kind)
+}
+
 function expectedEvolutionSections(format: string) {
   if (format === 'SOAP') return ['subjetivo', 'objetivo', 'avaliacao', 'plano']
   if (format === 'DAP') return ['dados', 'avaliacao', 'plano']
@@ -91,7 +103,7 @@ function hasCompleteEvolutionContent(format: string, content: Record<string, unk
 
 export async function assertDynamicFinalizationReady(consultationId: string, userId: string) {
   const consultation = await findOwnedConsultation(consultationId, userId)
-  if (!consultation || consultation.formMode !== 'dynamic') return
+  if (!consultation || !consultation.formTemplateVersionId) return
   const blockers = consultation.quarantineItems.filter(
     (item) => item.status === 'pendente' && BLOCKING_QUARANTINE_KINDS.has(item.kind)
   )
@@ -462,8 +474,12 @@ async function documentSourceSnapshot(
       id: segment.id,
       sequence: segment.sequence,
       speakerLabel: segment.speakerLabel,
+      speakerDisplayName: segment.speakerDisplayName,
       participantId: segment.participantId,
       participantRole: segment.participantRole,
+      participantAuthorized: segment.participantAuthorized,
+      sessionContextAuthorized: segment.sessionContextAuthorized,
+      sessionReviewAuthorized: segment.sessionReviewAuthorized,
       ...(documentKind === 'restrito'
         ? { text: segment.text }
         : { textHash: createHash('sha256').update(segment.text).digest('hex') }),
@@ -575,6 +591,7 @@ function runtimePayload(
     }),
     quarantine: consultation.quarantineItems.map((item) => ({
       ...item,
+      blocksFinalization: quarantineBlocksFinalization(item.kind),
       sourceText: item.sourceText ? revealSensitiveText(item.sourceText) : null,
       payloadJson: item.payloadJson ? revealSensitiveText(item.payloadJson) : null,
     })),
@@ -605,7 +622,10 @@ function runtimePayload(
       })),
     conversation: {
       transcript: consultation.transcript,
-      turns: parseJson<DialogueTurn[]>(consultation.transcriptStructured, []),
+      turns: enrichDialogueTurns(
+        consultation,
+        parseJson<DialogueTurn[]>(consultation.transcriptStructured, [])
+      ),
       segments: transcriptSegmentsFromStored(consultation, consultation.transcriptSegments),
     },
     canChangeForm: normalizeConsultationStatus(consultation.status) === CONSULTATION_STATUS.WAITING,
@@ -619,11 +639,8 @@ export async function getDynamicRuntime(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic' || !consultation.formTemplateVersionId) {
-    return reply.send({ formMode: 'legacy', consultationId: consultation.id })
-  }
-  if (!dynamicFormsEnabled()) {
-    return reply.status(503).send({ error: 'Formularios dinamicos estao desabilitados' })
+  if (!consultation.formTemplateVersionId) {
+    return reply.status(409).send({ error: 'A consulta nao possui uma versao de formulario publicada' })
   }
 
   const definition = definitionForConsultation(consultation)
@@ -642,7 +659,7 @@ export async function getDynamicRuntime(
     recordSensitiveAccess({
       actorUserId: req.authUser!.id,
       consultationId: refreshed.id,
-      dataClass: 'registro_psicologico_restrito',
+      dataClass: 'registro_clinico_restrito',
       action: 'visualizar_runtime',
       requestId: req.id,
     }),
@@ -778,8 +795,8 @@ export async function updateDynamicFields(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') {
-    return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) {
+    return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   }
   const documentKind = req.body?.documentKind
   const changes = req.body?.changes
@@ -829,8 +846,8 @@ export async function changeDynamicFormVersion(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') {
-    return reply.status(409).send({ error: 'Consultas legadas nao podem ser convertidas por esta operacao' })
+  if (!consultation.formTemplateVersionId) {
+    return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   }
   if (normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.WAITING) {
     return reply.status(409).send({ error: 'O formulario so pode ser alterado antes do inicio da consulta' })
@@ -1115,7 +1132,7 @@ export async function upsertDynamicParticipant(
 ) {
   let consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   if (documentWasDeleted(consultation, 'compartilhavel')) {
     return reply.status(410).send({ error: 'O prontuario compartilhavel foi excluido pela politica de retencao' })
   }
@@ -1253,8 +1270,8 @@ export async function recordDynamicConsent(
 ) {
   let consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') {
-    return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) {
+    return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   }
   if (documentWasDeleted(consultation, 'compartilhavel')) {
     return reply.status(410).send({ error: 'O prontuario compartilhavel foi excluido pela politica de retencao' })
@@ -1353,10 +1370,7 @@ export async function recordDynamicConsent(
 
 export async function assertDynamicRecordingConsent(consultationId: string, userId: string) {
   let consultation = await findOwnedConsultation(consultationId, userId)
-  if (!consultation || consultation.formMode !== 'dynamic') return
-  if (!dynamicFormsEnabled()) {
-    throw new ConsentRequiredError('Os formularios dinamicos de Psicologia estao desativados')
-  }
+  if (!consultation || !consultation.formTemplateVersionId) return
   assertDocumentAvailable(consultation)
 
   await ensureCoreParticipants(consultation)
@@ -1384,27 +1398,98 @@ export async function assertDynamicRecordingConsent(consultationId: string, user
 
 function transcriptSegmentsFromStored(
   consultation: NonNullable<Awaited<ReturnType<typeof findOwnedConsultation>>>,
-  stored: Array<{ id: string; sequence: number; text: string; payload: string | null; createdAt?: Date }>
+  stored: Array<{
+    id: string
+    sequence: number
+    text: string
+    payload: string | null
+    source?: string
+    kind?: string
+    createdAt?: Date
+  }>
 ): DynamicTranscriptSegment[] {
   const participantsByLabel = new Map(
     consultation.participants.filter((item) => item.speakerLabel).map((item) => [item.speakerLabel!, item])
   )
   return stored.map((segment) => {
-    const payload = parseJson<{ speakerLabel?: string; startMs?: number; endMs?: number }>(segment.payload, {})
+    const payload = parseJson<{
+      speakerLabel?: string
+      speakerDisplayName?: string
+      startMs?: number
+      endMs?: number
+    }>(segment.payload, {})
     const participant = payload.speakerLabel ? participantsByLabel.get(payload.speakerLabel) : undefined
+    const isLiveUnassignedSegment = !payload.speakerLabel && (
+      ((segment.source === 'openai_realtime' || segment.source === 'whisper_chunk') &&
+        (segment.kind === 'completed' || segment.kind === 'transcribed_chunk')) ||
+      (segment.source === 'edicao_profissional' && segment.kind === 'transcricao_corrigida')
+    )
+    const segmentOccurredAt = segment.createdAt || consultation.startedAt
+    const sessionProvisionallyAuthorized = !participant &&
+      isLiveUnassignedSegment &&
+      consultationAllowsSessionAiAt(consultation, segmentOccurredAt)
     return {
       id: segment.id,
       sequence: segment.sequence,
       text: segment.text,
       speakerLabel: payload.speakerLabel || null,
+      speakerDisplayName: payload.speakerDisplayName || (participant
+        ? safeParticipantRoleDisplayName(participant.role)
+        : sessionProvisionallyAuthorized ? 'Voz em identificação' : null),
       participantId: participant?.id || null,
       participantRole: participant?.role || null,
       participantAuthorized: participant
-        ? participantWasAuthorizedAt(consultation, participant, segment.createdAt || consultation.audioSavedAt)
+        ? participantWasAuthorizedAt(consultation, participant, segmentOccurredAt)
         : undefined,
+      sessionProvisionallyAuthorized,
       startMs: payload.startMs ?? null,
       endMs: payload.endMs ?? null,
     }
+  })
+}
+
+function safeParticipantRoleDisplayName(role: string) {
+  const labels: Record<string, string> = {
+    profissional: 'Profissional',
+    paciente: 'Paciente',
+    responsavel: 'Responsável pelo paciente',
+    familiar: 'Familiar do paciente',
+    acompanhante: 'Acompanhante',
+    interprete: 'Intérprete',
+    outro: 'Outro participante',
+  }
+  return labels[role] || 'Participante'
+}
+
+/**
+ * Durante a gravacao, o Realtime entrega texto antes de existir diarizacao
+ * acustica. Permitimos que esses segmentos alimentem apenas o rascunho
+ * incremental quando toda a sessao conhecida esta consentida. A revisao final
+ * nao usa esta permissao: ela volta a exigir a voz identificada e autorizada.
+ */
+function consultationAllowsSessionAiAt(
+  consultation: NonNullable<Awaited<ReturnType<typeof findOwnedConsultation>>>,
+  referenceAt?: Date | null
+) {
+  if (
+    !consentWasGrantedAt(
+      consultation.consents,
+      { type: 'gravacao_audio', participantId: null },
+      referenceAt
+    ) ||
+    !consentWasGrantedAt(
+      consultation.consents,
+      { type: 'transcricao_ia', participantId: null },
+      referenceAt
+    )
+  ) {
+    return false
+  }
+
+  return consultation.participants.every((participant) => {
+    if (referenceAt && participant.createdAt.getTime() > referenceAt.getTime()) return true
+    if (participant.role === 'profissional') return true
+    return participantWasAuthorizedAt(consultation, participant, referenceAt)
   })
 }
 
@@ -1413,14 +1498,13 @@ function participantWasAuthorizedAt(
   participant: (typeof consultation.participants)[number],
   referenceAt?: Date | null
 ) {
-  if (!participant.active) return false
+  if (referenceAt && participant.createdAt.getTime() > referenceAt.getTime()) return false
   if (participant.role === 'profissional') return true
-  const latestConsent = consultation.consents.find((consent) =>
-    consent.type === 'participacao' && consent.participantId === participant.id
+  return consentWasGrantedAt(
+    consultation.consents,
+    { type: 'participacao', participantId: participant.id },
+    referenceAt
   )
-  if (!participant.authorized || latestConsent?.granted !== true || latestConsent.revokedAt) return false
-  if (referenceAt && latestConsent.recordedAt.getTime() > referenceAt.getTime()) return false
-  return true
 }
 
 function transcriptSegmentsFromTurns(
@@ -1430,22 +1514,98 @@ function transcriptSegmentsFromTurns(
   const participantsByLabel = new Map(
     consultation.participants.filter((item) => item.speakerLabel).map((item) => [item.speakerLabel!, item])
   )
+  const coreProfessional = consultation.participants.find((item) =>
+    item.active && (item.coreKey === 'profissional' || item.role === 'profissional')
+  )
+  const corePatient = consultation.participants.find((item) =>
+    item.active && (item.coreKey === 'paciente' || item.role === 'paciente')
+  )
   return turns.map((turn, index) => {
-    const participant = turn.diarizationLabel
+    const turnOccurredAt = estimateDialogueTurnOccurredAt({
+      startedAt: consultation.startedAt,
+      turnStartSeconds: turn.start,
+      audioSavedAt: consultation.audioSavedAt,
+      finishedAt: consultation.finishedAt,
+    })
+    const sessionAllowsReviewVoices = consultationAllowsSessionAiAt(
+      consultation,
+      turnOccurredAt
+    )
+    const manuallyMappedParticipant = turn.diarizationLabel
       ? participantsByLabel.get(turn.diarizationLabel)
       : undefined
+    const participant = manuallyMappedParticipant || (
+      turn.roleSource === 'automatico'
+        ? turn.speaker === 'Medico'
+          ? coreProfessional
+          : turn.speaker === 'Paciente' ? corePatient : undefined
+        : undefined
+    )
+    const speakerDisplayName = participant
+      ? safeParticipantRoleDisplayName(participant.role)
+      : turn.speakerDisplayName || null
+    const hasAuthorizedContextualRelation = !participant &&
+      turn.speaker === 'Terceiro' &&
+      turn.roleSource === 'automatico' &&
+      Boolean(turn.contextualRelation) &&
+      (turn.roleConfidence ?? 0) >= AUTOMATIC_SPEAKER_ROLE_MIN_CONFIDENCE &&
+      sessionAllowsReviewVoices
+    const hasSessionReviewVoice = !participant &&
+      (turn.speaker === 'Terceiro' || turn.speaker === 'Indefinido') &&
+      !hasAuthorizedContextualRelation &&
+      sessionAllowsReviewVoices
     return {
       id: `diarized-${index + 1}`,
       sequence: index + 1,
       text: turn.text,
       speakerLabel: turn.diarizationLabel || null,
+      speakerDisplayName,
       participantId: participant?.id || null,
-      participantRole: participant?.role || null,
+      participantRole: participant?.role ||
+        (hasAuthorizedContextualRelation ? 'relacao_contextual' : null),
       participantAuthorized: participant
-        ? participantWasAuthorizedAt(consultation, participant, consultation.audioSavedAt)
+        ? participantWasAuthorizedAt(consultation, participant, turnOccurredAt)
         : undefined,
+      sessionContextAuthorized: hasAuthorizedContextualRelation,
+      sessionReviewAuthorized: hasSessionReviewVoice,
       startMs: turn.start == null ? null : Math.round(turn.start * 1000),
       endMs: turn.end == null ? null : Math.round(turn.end * 1000),
+    }
+  })
+}
+
+function enrichDialogueTurns(
+  consultation: NonNullable<Awaited<ReturnType<typeof findOwnedConsultation>>>,
+  turns: DialogueTurn[]
+) {
+  const segments = transcriptSegmentsFromTurns(consultation, turns)
+  const manuallyMappedLabels = new Set(
+    consultation.participants
+      .map((participant) => participant.speakerLabel)
+      .filter((label): label is string => Boolean(label))
+  )
+  return turns.map((turn, index): DialogueTurn => {
+    const segment = segments[index]
+    const manuallyMapped = Boolean(
+      turn.diarizationLabel && manuallyMappedLabels.has(turn.diarizationLabel)
+    )
+    const speaker = segment?.participantRole === 'profissional'
+      ? 'Medico'
+      : segment?.participantRole === 'paciente'
+        ? 'Paciente'
+        : segment?.participantRole ? 'Terceiro' : turn.speaker
+    return {
+      ...turn,
+      speaker,
+      speakerDisplayName: segment?.speakerDisplayName || turn.speakerDisplayName,
+      roleSource: manuallyMapped ? 'manual' : turn.roleSource,
+      roleConfidence: manuallyMapped ? null : turn.roleConfidence,
+      sessionContextAuthorized: segment?.sessionContextAuthorized === true,
+      sessionReviewAuthorized: segment?.sessionReviewAuthorized === true,
+      participantId: segment?.participantId || null,
+      ...(segment?.participantAuthorized === undefined
+        ? {}
+        : { participantAuthorized: segment.participantAuthorized }),
     }
   })
 }
@@ -1462,14 +1622,7 @@ async function applyAiOutput(
 
   await prisma.$transaction(async (tx) => {
     if (fullReconciliation) {
-      const retainedKeys = new Set(
-        updates
-          .filter((update) =>
-            update.aiMode !== 'sugerir_revisao' && update.reviewStatus !== 'revisao_obrigatoria'
-          )
-          .map((update) => `${update.documentKind}:${update.fieldId}`)
-      )
-      const staleAiValues = await tx.consultationFieldValue.findMany({
+      const reconciliationCandidates = await tx.consultationFieldValue.findMany({
         where: {
           consultationId: consultation.id,
           source: 'ia',
@@ -1477,8 +1630,11 @@ async function applyAiOutput(
         },
         include: { document: { select: { kind: true } } },
       })
+      const staleAiValues = staleAiValuesAfterFullReconciliation(
+        reconciliationCandidates,
+        updates
+      )
       for (const stale of staleAiValues) {
-        if (retainedKeys.has(`${stale.document.kind}:${stale.fieldId}`)) continue
         await tx.consultationFieldEvent.create({
           data: {
             consultationId: consultation.id,
@@ -1495,9 +1651,7 @@ async function applyAiOutput(
           },
         })
       }
-      const staleIds = staleAiValues
-        .filter((stale) => !retainedKeys.has(`${stale.document.kind}:${stale.fieldId}`))
-        .map((stale) => stale.id)
+      const staleIds = staleAiValues.map((stale) => stale.id)
       if (staleIds.length) {
         await tx.consultationFieldValue.deleteMany({ where: { id: { in: staleIds } } })
       }
@@ -1514,7 +1668,9 @@ async function applyAiOutput(
           data: {
             consultationId: consultation.id,
             kind: 'sugestao_ia',
-            reason: 'Campo configurado para revisao profissional antes do preenchimento.',
+            reason: update.aiMode === 'sugerir_revisao'
+              ? 'Campo configurado para revisao profissional antes do preenchimento.'
+              : 'Sugestao baseada em fonte contextual ou ambigua; nao foi aplicada ao formulario e exige decisao profissional.',
             sourceText: update.documentKind === 'restrito'
               ? protectSensitiveText(update.evidence.map((item) => item.quote).join(' | '))
               : update.evidence.map((item) => item.quote).join(' | '),
@@ -1624,7 +1780,7 @@ async function runDynamicInterpretation(input: {
     create: {
       consultationId: input.consultation.id,
       templateId: `dynamic:${input.consultation.formTemplateVersionId}`,
-      promptVersion: 'dynamic-psychology-responses-v1',
+      promptVersion: 'dynamic-clinical-responses-v1',
       schemaVersion: manifest.schemaVersion,
     },
     update: {},
@@ -1662,7 +1818,28 @@ async function runDynamicInterpretation(input: {
     },
     orderBy: { sequence: 'asc' },
   })
-  const segments = input.segments || transcriptSegmentsFromStored(input.consultation, storedSegments)
+  let segments = input.segments || transcriptSegmentsFromStored(input.consultation, storedSegments)
+  if (
+    !input.segments &&
+    !input.force &&
+    !input.finalReview &&
+    storedSegments.length
+  ) {
+    const firstNewSequence = Math.min(...storedSegments.map((segment) => segment.sequence))
+    const contextStored = await prisma.consultationTranscriptSegment.findMany({
+      where: {
+        consultationId: input.consultation.id,
+        sequence: { lt: firstNewSequence },
+      },
+      orderBy: { sequence: 'desc' },
+      take: DYNAMIC_INCREMENTAL_CONTEXT_SEGMENTS,
+    })
+    const contextSegments = transcriptSegmentsFromStored(
+      input.consultation,
+      contextStored.reverse()
+    ).map((segment) => ({ ...segment, contextOnly: true }))
+    segments = [...contextSegments, ...segments]
+  }
   if (!segments.length) {
     return {
       updates: [],
@@ -1698,6 +1875,10 @@ async function runDynamicInterpretation(input: {
       currentValues: await currentValues(input.consultation, manifest),
       segments,
       finalReview: input.finalReview,
+      // Enquanto grava, a transcricao chega antes da diarizacao. Somente a
+      // passada incremental comum pode usar essa evidencia como provisoria.
+      // Force/revisao final exigem voz identificada e autorizada.
+      allowSessionProvisional: !input.force && !input.finalReview,
     })
 
     // Renova a posse antes de persistir. Se outra requisicao recuperou uma
@@ -1742,12 +1923,20 @@ async function runDynamicInterpretation(input: {
           : processingThroughSequence,
         processingThroughSequence: null,
         processingStartedAt: null,
-        promptVersion: 'dynamic-psychology-responses-v1',
+        promptVersion: 'dynamic-clinical-responses-v1',
         schemaVersion: manifest.schemaVersion,
         finalReviewAt: input.finalReview ? new Date() : aiState.finalReviewAt,
       },
     })
-    return { ...output, processedThroughSequence: processingThroughSequence, processing: false }
+    return {
+      ...output,
+      quarantine: output.quarantine.map((item) => ({
+        ...item,
+        blocksFinalization: quarantineBlocksFinalization(item.kind),
+      })),
+      processedThroughSequence: processingThroughSequence,
+      processing: false,
+    }
   } catch (error) {
     await prisma.consultationAiState.updateMany({
       where: {
@@ -1765,10 +1954,9 @@ export async function reinterpretDynamicConsultation(
   req: FastifyRequest<{ Params: { id: string }; Body: { force?: boolean } }>,
   reply: FastifyReply
 ) {
-  if (!dynamicFormsEnabled()) return reply.status(404).send({ error: 'Formularios dinamicos estao desativados' })
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   if (normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
     return reply.status(409).send({ error: 'A IA clinica so pode interpretar uma consulta em andamento' })
   }
@@ -1797,57 +1985,18 @@ export async function reinterpretDynamicConsultation(
   }
 }
 
-export async function diarizeDynamicConsultation(
-  req: FastifyRequest<{ Params: { id: string } }>,
-  reply: FastifyReply
-) {
-  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
-  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
-  if (normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
-    return reply.status(409).send({ error: 'A identificacao de vozes so ocorre durante uma consulta em andamento' })
-  }
-  if (!consultation.audioPath) return reply.status(400).send({ error: 'Audio completo nao disponivel para diarizacao' })
-  if (consultation.transcriptSegments.some((segment) => segment.kind === 'transcricao_corrigida')) {
-    return reply.status(409).send({
-      error: 'A transcricao foi corrigida. Revise manualmente as vozes; o audio antigo nao pode substituir a correcao.',
-      code: 'TRANSCRIPT_EDIT_REVIEW_REQUIRED',
-    })
-  }
-
-  await assertDynamicRecordingConsent(consultation.id, req.authUser!.id)
-
-  try {
-    const turns = await diarizeAudio(consultation.audioPath)
-    await getPrisma().consultation.update({
-      where: { id: consultation.id },
-      data: { transcriptStructured: JSON.stringify(turns) },
-    })
-    const mappedLabels = new Set(consultation.participants.map((item) => item.speakerLabel).filter(Boolean))
-    const unknownLabels = Array.from(new Set(
-      turns.map((turn) => turn.diarizationLabel).filter((label): label is string => Boolean(label && !mappedLabels.has(label)))
-    ))
-    return reply.send({ turns, unknownLabels, requiresConfirmation: unknownLabels.length > 0 })
-  } catch (error) {
-    console.error('[diarizacao] Falha:', error)
-    return reply.status(502).send({
-      error: error instanceof Error ? error.message : 'Nao foi possivel separar as vozes',
-    })
-  }
-}
-
 export async function getDynamicConversationTopics(
   req: FastifyRequest<{ Params: { id: string } }>,
   reply: FastifyReply
 ) {
-  if (!dynamicFormsEnabled()) return reply.status(404).send({ error: 'Formularios dinamicos estao desativados' })
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') {
-    return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) {
+    return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   }
-  if (normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
-    return reply.status(409).send({ error: 'Os topicos por IA so podem ser gerados durante uma consulta em andamento' })
+  const normalizedStatus = normalizeConsultationStatus(consultation.status)
+  if (normalizedStatus === CONSULTATION_STATUS.WAITING) {
+    return reply.status(409).send({ error: 'Os topicos por IA ficam disponiveis depois que a consulta for iniciada' })
   }
 
   await assertDynamicRecordingConsent(consultation.id, req.authUser!.id)
@@ -1863,6 +2012,11 @@ export async function getDynamicConversationTopics(
       templateVersionKey: consultation.formTemplateVersion?.checksum || consultation.formTemplateVersionId!,
       manifest: manifestForConsultation(consultation, definition),
       segments,
+      // Antes da evolução ainda não há diarização. Os mesmos segmentos
+      // consentidos que alimentam o PEP em tempo real podem organizar tópicos,
+      // sem promover essa autorização provisória para o SOAP.
+      allowSessionProvisional:
+        normalizedStatus === CONSULTATION_STATUS.IN_PROGRESS && !turns.length,
     })
     return reply.send({ topics })
   } catch (error) {
@@ -1884,10 +2038,9 @@ export async function generateDynamicDocument(
   }>,
   reply: FastifyReply
 ) {
-  if (!dynamicFormsEnabled()) return reply.status(404).send({ error: 'Formularios dinamicos estao desativados' })
   let consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   if (normalizeConsultationStatus(consultation.status) !== CONSULTATION_STATUS.IN_PROGRESS) {
     return reply.status(409).send({ error: 'Gere a evolucao enquanto a consulta estiver em andamento' })
   }
@@ -1983,7 +2136,26 @@ export async function generateDynamicDocument(
       (segment) => segment.kind === 'transcricao_corrigida'
     )
     if (!turns.length && consultation.audioPath && !hasEditedTranscript) {
-      turns = await diarizeAudio(consultation.audioPath)
+      turns = enrichDialogueTurns(consultation, await diarizeAudio(consultation.audioPath))
+      await getPrisma().consultation.update({
+        where: { id: consultation.id },
+        data: { transcriptStructured: JSON.stringify(turns) },
+      })
+    } else if (!turns.length && hasEditedTranscript) {
+      const contextualTurns = await diarizeTranscript(consultation.transcript || '')
+      turns = enrichDialogueTurns(consultation, contextualTurns.map((turn) => ({
+        ...turn,
+        roleSource: turn.roleSource || (
+          turn.speaker === 'Medico' || turn.speaker === 'Paciente'
+            ? 'automatico' as const
+            : 'desconhecido' as const
+        ),
+        speakerDisplayName: turn.speakerDisplayName || (
+          turn.speaker === 'Medico'
+            ? 'Profissional'
+            : turn.speaker === 'Paciente' ? 'Paciente' : 'Desconhecido'
+        ),
+      })))
       await getPrisma().consultation.update({
         where: { id: consultation.id },
         data: { transcriptStructured: JSON.stringify(turns) },
@@ -1996,31 +2168,38 @@ export async function generateDynamicDocument(
       : transcriptSegmentsFromStored(consultation, consultation.transcriptSegments)
     if (!segments.length) {
       return reply.status(409).send({
-        error: 'Separe e confirme as vozes antes de gerar a evolucao',
-        code: 'SPEAKER_CONFIRMATION_REQUIRED',
-        unknownLabels: ['Indefinido'],
+        error: 'Nenhuma fala autorizada esta disponivel para a IA',
+        code: 'AUTHORIZED_SPEECH_REQUIRED',
+        excludedSpeakerNames: ['Desconhecido'],
         turns,
       })
     }
-    const unknownLabels = Array.from(new Set(
-      segments.filter((segment) => segment.participantAuthorized !== true).map((segment) => segment.speakerLabel || 'Indefinido')
-    ))
-    if (unknownLabels.length) {
+    const authorizedSegments = segments.filter(canUseSegmentForFinalDocumentDraft)
+    if (!authorizedSegments.length) {
+      const excludedSpeakerNames = Array.from(new Set(
+        segments.map((segment) => segment.speakerDisplayName || 'Desconhecido')
+      ))
       return reply.status(409).send({
-        error: 'Confirme a identidade e autorizacao de todas as vozes antes de gerar a evolucao',
-        code: 'SPEAKER_CONFIRMATION_REQUIRED',
-        unknownLabels,
+        error: 'Nenhuma fala autorizada esta disponivel para a IA',
+        code: 'AUTHORIZED_SPEECH_REQUIRED',
+        excludedSpeakerNames,
         turns,
       })
     }
 
-    await runDynamicInterpretation({
+    const finalInterpretation = await runDynamicInterpretation({
       consultation,
       ownerId: req.authUser!.id,
       force: true,
       finalReview: true,
       segments,
     })
+    if (finalInterpretation.processing) {
+      return reply.status(409).send({
+        error: 'O preenchimento em tempo real ainda esta sendo consolidado. Tente gerar a evolucao novamente em instantes.',
+        code: 'AI_RECONCILIATION_IN_PROGRESS',
+      })
+    }
     const refreshed = await findOwnedConsultation(consultation.id, req.authUser!.id)
     if (!refreshed) return reply.status(404).send({ error: 'Consulta nao encontrada' })
     const manifest = manifestForConsultation(refreshed, definition)
@@ -2035,7 +2214,7 @@ export async function generateDynamicDocument(
     })
     const evidenceError = validateGeneratedDocumentEvidence(
       generated as unknown as Record<string, unknown>,
-      new Set(segments.map((segment) => segment.id)),
+      new Set(authorizedSegments.map((segment) => segment.id)),
       true
     )
     if (evidenceError) throw new Error(evidenceError)
@@ -2187,7 +2366,7 @@ export async function confirmDynamicDocument(
 
   try {
     const updated = await getPrisma().$transaction(async (tx) => {
-      const [liveConsultation, blockingItems, aiState, unauthorizedParticipants, latestAiConsent] = await Promise.all([
+      const [liveConsultation, blockingItems, aiState, latestAiConsent] = await Promise.all([
         tx.consultation.findUnique({ where: { id: consultation.id } }),
         tx.consultationQuarantineItem.count({
           where: {
@@ -2197,14 +2376,6 @@ export async function confirmDynamicDocument(
           },
         }),
         tx.consultationAiState.findUnique({ where: { consultationId: consultation.id } }),
-        tx.consultationParticipant.count({
-          where: {
-            consultationId: consultation.id,
-            active: true,
-            authorized: false,
-            role: { not: 'profissional' },
-          },
-        }),
         tx.consultationConsent.findFirst({
           where: { consultationId: consultation.id, type: 'transcricao_ia' },
           orderBy: { recordedAt: 'desc' },
@@ -2221,9 +2392,9 @@ export async function confirmDynamicDocument(
       if (blockingItems > 0) {
         throw new FinalizationBlockedError(`Revise ${blockingItems} item(ns) critico(s) antes de confirmar`)
       }
-      if (document.source === 'ia' && (unauthorizedParticipants > 0 || latestAiConsent?.granted !== true)) {
+      if (document.source === 'ia' && latestAiConsent?.granted !== true) {
         throw new FinalizationBlockedError(
-          'Confirme os consentimentos de IA e de todos os participantes antes de confirmar a evolucao'
+          'Confirme o consentimento de transcricao e IA antes de confirmar a evolucao'
         )
       }
       if (aiState?.processingThroughSequence != null) {
@@ -2313,7 +2484,10 @@ export async function resolveDynamicQuarantine(
       resolvedAt: new Date(),
     },
   })
-  return reply.send(updated)
+  return reply.send({
+    ...updated,
+    blocksFinalization: quarantineBlocksFinalization(updated.kind),
+  })
 }
 
 export async function getMedicationReference(
@@ -2322,7 +2496,7 @@ export async function getMedicationReference(
 ) {
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   if (documentWasDeleted(consultation, 'compartilhavel')) {
     return reply.status(410).send({ error: 'O prontuario compartilhavel foi excluido pela politica de retencao' })
   }
@@ -2393,8 +2567,8 @@ export async function createDynamicTranscriptVersion(
   if (!newTranscript) return reply.status(400).send({ error: 'Transcricao editada nao pode ser vazia' })
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
-  if (consultation.formMode !== 'dynamic') {
-    return reply.status(409).send({ error: 'Consulta utiliza o prontuario legado' })
+  if (!consultation.formTemplateVersionId) {
+    return reply.status(409).send({ error: 'A consulta nao possui formulario configurado' })
   }
   if (documentWasDeleted(consultation)) {
     return reply.status(410).send({ error: 'A consulta teve conteudo excluido e nao aceita nova transcricao' })
@@ -2411,7 +2585,8 @@ export async function createDynamicTranscriptVersion(
 
   // A edicao substitui os segmentos e invalida IDs, tempos e atribuicoes de
   // falante anteriores. Valores manuais permanecem; valores exclusivamente da
-  // IA voltam para revisao ate uma nova diarizacao/confirmacao de evidencias.
+  // IA sao recalculados em tempo real, e os papeis voltam a ser avaliados
+  // somente quando a evolucao for gerada.
   const aiValuesToInvalidate = consultation.documents.flatMap((document) =>
     document.fieldValues
       .filter((field) => field.source === 'ia')
@@ -2488,7 +2663,7 @@ export async function createDynamicTranscriptVersion(
         text: newTranscript,
         source: 'edicao_profissional',
         kind: 'transcricao_corrigida',
-        payload: JSON.stringify({ requiresSpeakerRemapping: true }),
+        payload: JSON.stringify({ speakerRolesPendingFinalDocument: true }),
       },
     })
     await tx.consultation.update({
@@ -2507,8 +2682,8 @@ export async function createDynamicTranscriptVersion(
     await tx.consultationQuarantineItem.create({
       data: {
         consultationId: consultation.id,
-        kind: 'remapeamento_vozes',
-        reason: 'A transcricao foi corrigida; confirme novamente a atribuicao das vozes antes de usar a IA.',
+        kind: 'transcricao_editada_pendente_revisao',
+        reason: 'A transcricao foi corrigida; os papeis da conversa serao reavaliados ao gerar a evolucao.',
         sourceText: null,
       },
     })
@@ -2521,16 +2696,38 @@ export async function createDynamicTranscriptVersion(
   return reply.send({
     savedVersion,
     removedAiFieldIds: aiValuesToInvalidate.map(({ field }) => field.fieldId),
-    requiresSpeakerRemapping: true,
+    requiresSpeakerRemapping: false,
     runtime: runtimePayload(refreshed, definition, manifestForConsultation(refreshed, definition)),
   })
+}
+
+export async function listDynamicTranscriptVersions(
+  req: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
+  if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
+
+  const versions = await getPrisma().consultationVersion.findMany({
+    where: { consultationId: consultation.id },
+    orderBy: { version: 'desc' },
+    select: {
+      id: true,
+      consultationId: true,
+      version: true,
+      transcript: true,
+      reason: true,
+      editDiff: true,
+      createdAt: true,
+    },
+  })
+  return reply.send(versions)
 }
 
 export async function exportDynamicDocument(
   req: FastifyRequest<{ Params: { id: string; kind: 'compartilhavel' | 'restrito' } }>,
   reply: FastifyReply
 ) {
-  if (!dynamicFormsEnabled()) return reply.status(404).send({ error: 'Formularios dinamicos estao desativados' })
   const consultation = await findOwnedConsultation(req.params.id, req.authUser!.id)
   if (!consultation) return reply.status(404).send({ error: 'Consulta nao encontrada' })
   const kind = req.params.kind
@@ -2585,7 +2782,7 @@ export async function exportDynamicDocument(
   await recordSensitiveAccess({
     actorUserId: req.authUser!.id,
     consultationId: consultation.id,
-    dataClass: kind === 'restrito' ? 'registro_psicologico_restrito' : 'prontuario_compartilhavel',
+    dataClass: kind === 'restrito' ? 'registro_clinico_restrito' : 'prontuario_compartilhavel',
     action: 'exportar_documento',
     requestId: req.id,
   })

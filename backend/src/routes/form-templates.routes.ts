@@ -10,14 +10,7 @@ import {
   setDefaultFormTemplate,
   updateFormTemplate,
 } from '../controllers/form-templates.controller'
-import { isDynamicPsychologyEnabled } from '../services/form-templates.service'
-
 export async function formTemplatesRoutes(fastify: FastifyInstance) {
-  fastify.addHook('preHandler', async (_request, reply) => {
-    if (!isDynamicPsychologyEnabled()) {
-      return reply.status(404).send({ error: 'Formularios dinamicos estao desativados' })
-    }
-  })
   fastify.get('/', listFormTemplates)
   fastify.post('/', createFormTemplate)
   fastify.get('/:id', getFormTemplate)

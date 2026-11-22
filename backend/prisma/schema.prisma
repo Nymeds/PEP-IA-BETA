@@ -126,7 +126,9 @@ model ClinicalFormDefault {
   @@index([templateId])
 }
 
-model LegacyScheduleSettings {
+/// Estrutura histórica mantida apenas para não descartar configurações antigas.
+/// O runtime atual usa Schedule e não lê nem grava esta tabela.
+model ArchivedScheduleSettings {
   id                         String   @id
   userId                     String   @unique
   activeWeekDaysJson         String
@@ -180,7 +182,7 @@ model Consultation {
   patientId              String
   scheduleId             String?
   specialtyCode          String?
-  formMode               String    @default("legacy")
+  formMode               String    @default("dynamic")
   formTemplateVersionId  String?
   formDefinitionSnapshot String?
   formPinnedAt           DateTime?
@@ -194,6 +196,8 @@ model Consultation {
   transcriptStructured String?
   specialtyData        String?
 
+  // Snapshot histórico do prontuário fixo. O runtime dinâmico não lê nem grava
+  // estes campos; eles permanecem no banco apenas para evitar perda de dados.
   // Anamnese
   chiefComplaint   String?
   hda              String?

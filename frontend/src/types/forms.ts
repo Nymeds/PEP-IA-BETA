@@ -67,6 +67,7 @@ export interface ClinicalFormElement {
   type: FormElementType
   label: string
   helpText?: string
+  icon?: string
   color: FormColorToken
   required: boolean
   semanticRole?: string
@@ -131,6 +132,7 @@ export interface ClinicalFormTemplate {
   status: FormTemplateStatus
   origin: FormTemplateOrigin
   isDefault: boolean
+  linkedScheduleCount?: number
   draftDefinition: ClinicalFormDefinition
   latestVersion?: ClinicalFormVersionSummary | null
   versionCount?: number
@@ -173,9 +175,27 @@ export interface DynamicEvidence {
   sequence: number
   quote: string
   speakerLabel: string | null
+  speakerDisplayName?: string | null
   participantId?: string | null
   startMs: number | null
   endMs: number | null
+}
+
+export interface DynamicReviewPayload {
+  fieldId?: string
+  documentKind?: ClinicalDocumentKind
+  value?: unknown
+  valueJson?: string
+  uncertainty?: string | null
+  confidence?: 'low' | 'medium' | 'high' | string
+  relevanceReason?: string | null
+  summary?: string | null
+  evidence?: DynamicEvidence[]
+  reviewStatus?: string
+  aiMode?: Exclude<FormAiMode, 'sem_acesso'>
+  operation?: Exclude<FormAiMode, 'sem_acesso'>
+  kind?: string
+  severity?: 'low' | 'medium' | 'high' | string
 }
 
 export interface DynamicFieldValue {
@@ -187,6 +207,7 @@ export interface DynamicFieldValue {
   updatedAt: string
   confidence: 'low' | 'medium' | 'high' | null
   uncertainty: string | null
+  relevanceReason?: string | null
   history: Array<{
     id: string
     operation: string
@@ -243,9 +264,11 @@ export interface DynamicQuarantineItem {
   status: 'pendente' | 'restaurado' | 'descartado' | string
   sourceText: string | null
   payloadJson: string | null
+  payload?: DynamicReviewPayload | null
   resolvedBy: string | null
   resolvedAt: string | null
   createdAt: string
+  blocksFinalization?: boolean
 }
 
 export interface DynamicGeneratedSection {
@@ -287,6 +310,14 @@ export interface DynamicDialogueTurn {
   start?: number
   end?: number
   diarizationLabel?: string
+  speakerDisplayName?: string | null
+  roleSource?: DynamicSpeakerRoleSource
+  roleConfidence?: number | null
+  contextualRelation?: string | null
+  sessionContextAuthorized?: boolean
+  sessionReviewAuthorized?: boolean
+  participantId?: string | null
+  participantAuthorized?: boolean
 }
 
 export interface DynamicTranscriptSegment {
@@ -294,9 +325,14 @@ export interface DynamicTranscriptSegment {
   sequence: number
   text: string
   speakerLabel?: string | null
+  speakerDisplayName?: string | null
   participantId?: string | null
   participantRole?: string | null
   participantAuthorized?: boolean
+  sessionProvisionallyAuthorized?: boolean
+  sessionContextAuthorized?: boolean
+  sessionReviewAuthorized?: boolean
+  contextOnly?: boolean
   startMs?: number | null
   endMs?: number | null
 }
@@ -335,12 +371,7 @@ export interface DynamicConsultationRuntime {
   suppressFormChangeWarning: boolean
 }
 
-export interface LegacyConsultationRuntime {
-  formMode: 'legacy'
-  consultationId: string
-}
-
-export type ConsultationRuntimeResponse = DynamicConsultationRuntime | LegacyConsultationRuntime
+export type ConsultationRuntimeResponse = DynamicConsultationRuntime
 
 export interface DynamicFieldUpdateResult {
   updates: Array<{
@@ -351,6 +382,7 @@ export interface DynamicFieldUpdateResult {
     reviewStatus: string
     confidence: 'low' | 'medium' | 'high'
     uncertainty: string | null
+    relevanceReason?: string | null
     evidence: DynamicEvidence[]
     aiMode: Exclude<FormAiMode, 'sem_acesso'>
   }>
@@ -359,21 +391,19 @@ export interface DynamicFieldUpdateResult {
     reason: string
     sourceText: string | null
     segmentId: string | null
+    payload?: DynamicReviewPayload
   }>
   riskAlerts: Array<{
     kind: string
     severity: 'low' | 'medium' | 'high'
     summary: string
+    relevanceReason?: string | null
     evidence: DynamicEvidence[]
   }>
   processing: boolean
 }
 
-export interface DynamicDiarizationResult {
-  turns: DynamicDialogueTurn[]
-  unknownLabels: string[]
-  requiresConfirmation: boolean
-}
+export type DynamicSpeakerRoleSource = 'automatico' | 'manual' | 'desconhecido'
 
 export interface DynamicFormVersionPreview {
   preview: true
@@ -404,6 +434,23 @@ export interface DynamicConversationTopic {
   title: string
   summary: string
   evidence: DynamicEvidence[]
+}
+
+export interface DynamicTranscriptVersion {
+  id: string
+  consultationId: string
+  version: number
+  transcript: string | null
+  reason: string | null
+  editDiff: string | null
+  createdAt: string
+}
+
+export interface DynamicTranscriptVersionCreateResult {
+  savedVersion: number
+  removedAiFieldIds: string[]
+  requiresSpeakerRemapping: boolean
+  runtime: DynamicConsultationRuntime
 }
 
 export interface MedicationReference {

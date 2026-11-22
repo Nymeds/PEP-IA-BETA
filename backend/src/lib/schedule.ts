@@ -41,6 +41,40 @@ export interface GeneratedSlot {
   isoDateTime: string
 }
 
+export const SCHEDULE_PAST_TOLERANCE_MS = 60_000
+
+export type ScheduleSlotUnavailableReason =
+  | 'horario_passado'
+  | 'horario_ocupado'
+  | 'capacidade_esgotada'
+  | null
+
+/**
+ * Mantém a listagem de horários e a confirmação do agendamento sob a mesma
+ * regra de relógio. A pequena tolerância evita rejeitar um clique feito
+ * exatamente na virada do minuto.
+ */
+export function isScheduleSlotInPast(
+  value: Date | string,
+  now: Date | number = Date.now()
+): boolean {
+  const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime()
+  const nowTimestamp = now instanceof Date ? now.getTime() : now
+  return Number.isNaN(timestamp) || timestamp < nowTimestamp - SCHEDULE_PAST_TOLERANCE_MS
+}
+
+export function getScheduleSlotUnavailableReason(input: {
+  isoDateTime: string
+  hasAppointment: boolean
+  dailyCapacityReached: boolean
+  now?: Date | number
+}): ScheduleSlotUnavailableReason {
+  if (input.hasAppointment) return 'horario_ocupado'
+  if (isScheduleSlotInPast(input.isoDateTime, input.now)) return 'horario_passado'
+  if (input.dailyCapacityReached) return 'capacidade_esgotada'
+  return null
+}
+
 interface PersistedScheduleSettings {
   activeWeekDaysJson: string
   workOnHolidays: boolean

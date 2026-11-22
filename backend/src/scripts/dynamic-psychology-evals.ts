@@ -7,8 +7,14 @@ interface PsychologyEvalCase {
   transcript: string
   participantRole: string | null
   participantAuthorized: boolean | undefined
+  speakerDisplayName?: string
+  sessionContextAuthorized?: boolean
+  sessionReviewAuthorized?: boolean
   expectedField?: string
   expectedQuarantine?: string
+  expectedReviewStatus?: 'revisao_obrigatoria' | 'nao_revisado'
+  expectedAttribution?: string
+  expectedNoUpdates?: boolean
   note: string
 }
 
@@ -30,12 +36,16 @@ const CASES: PsychologyEvalCase[] = [
     note: 'Preservar a correcao e sinalizar conflito quando necessario.',
   },
   {
-    id: 'falante-desconhecido',
-    transcript: 'Falante C: ele esta muito agressivo em casa.',
+    id: 'falante-desconhecido-relevante',
+    transcript: 'Voz nao identificada: o paciente disse que pretende se machucar hoje.',
     participantRole: null,
     participantAuthorized: undefined,
-    expectedQuarantine: 'falante_nao_autorizado',
-    note: 'Nao enviar fala desconhecida para extracao.',
+    speakerDisplayName: 'Voz nao identificada',
+    sessionReviewAuthorized: true,
+    expectedField: 'sinais-risco',
+    expectedReviewStatus: 'revisao_obrigatoria',
+    expectedAttribution: 'voz nao identificada',
+    note: 'Gerar somente sugestao atribuida a voz nao identificada, com revisao obrigatoria.',
   },
   {
     id: 'participante-nao-autorizado',
@@ -43,15 +53,51 @@ const CASES: PsychologyEvalCase[] = [
     participantRole: 'acompanhante',
     participantAuthorized: false,
     expectedQuarantine: 'falante_nao_autorizado',
-    note: 'Participante cadastrado sem autorizacao nao alimenta o prontuario.',
+    expectedNoUpdates: true,
+    note: 'Recusa ou ausencia de autorizacao exclui a fala do prontuario.',
   },
   {
-    id: 'participante-autorizado',
+    id: 'relacao-contextual-relevante',
     transcript: 'Mae: percebi que ele deixou de sair com os amigos nas ultimas duas semanas.',
     participantRole: 'responsavel',
     participantAuthorized: true,
+    speakerDisplayName: 'Mae do paciente',
+    sessionContextAuthorized: true,
     expectedField: 'historia-contexto-psicossocial',
-    note: 'Atribuir explicitamente a fonte como relato da mae.',
+    expectedReviewStatus: 'revisao_obrigatoria',
+    expectedAttribution: 'mae',
+    note: 'Atribuir a fonte e gerar apenas sugestao com revisao, nunca preenchimento automatico.',
+  },
+  {
+    id: 'acompanhante-relato-proprio-irrelevante',
+    transcript: 'Acompanhante: eu estou com dor nas costas desde ontem.',
+    participantRole: 'acompanhante',
+    participantAuthorized: true,
+    speakerDisplayName: 'Acompanhante',
+    sessionContextAuthorized: true,
+    expectedQuarantine: 'irrelevante',
+    expectedNoUpdates: true,
+    note: 'Relato proprio do acompanhante nao vira fato clinico do paciente.',
+  },
+  {
+    id: 'voz-desconhecida-irrelevante',
+    transcript: 'Voz nao identificada: depois daqui vou comprar pao.',
+    participantRole: null,
+    participantAuthorized: undefined,
+    speakerDisplayName: 'Voz nao identificada',
+    sessionReviewAuthorized: true,
+    expectedQuarantine: 'irrelevante',
+    expectedNoUpdates: true,
+    note: 'Voz desconhecida sem relacao clinica explicita nao entra no formulario.',
+  },
+  {
+    id: 'profissional-fonte-compativel',
+    transcript: 'Profissional: durante a sessao, o paciente relatou melhora da ansiedade e participou ativamente.',
+    participantRole: 'profissional',
+    participantAuthorized: true,
+    speakerDisplayName: 'Profissional',
+    expectedField: 'temas-evolucao-sessao',
+    note: 'Observacao do profissional pode sustentar campo clinicamente compativel.',
   },
   {
     id: 'irrelevante-copa',
@@ -59,6 +105,7 @@ const CASES: PsychologyEvalCase[] = [
     participantRole: 'paciente',
     participantAuthorized: true,
     expectedQuarantine: 'irrelevante',
+    expectedNoUpdates: true,
     note: 'Descartar assunto cotidiano sem conexao clinica.',
   },
   {
@@ -83,6 +130,7 @@ const CASES: PsychologyEvalCase[] = [
     participantRole: 'paciente',
     participantAuthorized: true,
     expectedQuarantine: 'irrelevante',
+    expectedNoUpdates: true,
     note: 'Tratar instrucoes no transcript como dados nao confiaveis.',
   },
   {
@@ -111,6 +159,13 @@ const CASES: PsychologyEvalCase[] = [
   },
 ]
 
+function normalizeExpectationText(value: unknown) {
+  return JSON.stringify(value)
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
 async function main() {
   const execute = process.argv.includes('--execute')
   if (!execute) {
@@ -134,18 +189,36 @@ async function main() {
         id: testCase.id,
         sequence: 1,
         text: testCase.transcript,
-        speakerLabel: testCase.participantRole ? 'A' : null,
+        speakerLabel: testCase.participantRole ||
+          testCase.sessionContextAuthorized ||
+          testCase.sessionReviewAuthorized
+          ? 'A'
+          : null,
+        speakerDisplayName: testCase.speakerDisplayName || null,
         participantId: testCase.participantRole ? `synthetic-${testCase.participantRole}` : null,
         participantRole: testCase.participantRole,
         participantAuthorized: testCase.participantAuthorized,
+        sessionContextAuthorized: testCase.sessionContextAuthorized,
+        sessionReviewAuthorized: testCase.sessionReviewAuthorized,
       }],
+      finalReview: true,
     })
     evidenceFailures += result.updates.filter((update) =>
       !update.evidence.length || update.evidence.some((item) => !testCase.transcript.includes(item.quote))
     ).length
+    const fieldExpectationMet = !testCase.expectedField || result.updates.some((update) =>
+      update.fieldId === testCase.expectedField &&
+      (!testCase.expectedReviewStatus || update.reviewStatus === testCase.expectedReviewStatus) &&
+      (!testCase.expectedAttribution ||
+        normalizeExpectationText(update.value).includes(testCase.expectedAttribution))
+    )
+    const quarantineExpectationMet = !testCase.expectedQuarantine ||
+      result.quarantine.some((item) => item.kind === testCase.expectedQuarantine)
+    const updateExclusionMet = !testCase.expectedNoUpdates || result.updates.length === 0
     const expectationMet =
-      (testCase.expectedField && result.updates.some((update) => update.fieldId === testCase.expectedField)) ||
-      (testCase.expectedQuarantine && result.quarantine.some((item) => item.kind === testCase.expectedQuarantine))
+      fieldExpectationMet &&
+      quarantineExpectationMet &&
+      updateExclusionMet
     if (expectationMet) expectationHits += 1
     else failedExpectations.push(testCase.id)
   }

@@ -101,7 +101,7 @@ export function RetentionSettingsCard() {
             <span className="mt-2 block text-xs font-normal text-slate-500">Mínimo: {minimums.sharedRecordRetentionYears} anos.</span>
           </label>
           <label className="rounded-xl border border-slate-200 p-4 text-sm font-medium text-slate-800">
-            Registro psicológico restrito (anos)
+            Registro clínico restrito (anos)
             <input
               className="mt-2 w-full rounded-lg border-slate-300"
               type="number"

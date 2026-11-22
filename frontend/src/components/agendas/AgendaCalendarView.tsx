@@ -39,7 +39,6 @@ import { Button } from '@/components/ui/Button'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/AsyncState'
 import { AgendaQuickScheduleModal } from './AgendaQuickScheduleModal'
 import { AppointmentOperationDialog } from './AppointmentOperationDialog'
-import { dynamicPsychologyFormsEnabled } from '@/lib/features'
 
 type SlotFilter = 'all' | 'free' | 'reserved' | 'in_progress' | 'completed'
 
@@ -57,7 +56,7 @@ interface AgendaRuntimeMetadata {
 }
 
 interface AppointmentRuntimeMetadata {
-  formMode?: 'legacy' | 'dynamic' | null
+  formMode?: 'dynamic' | null
   specialtyCode?: string | null
   formTemplateVersionId?: string | null
   scheduleFormTemplateId?: string | null
@@ -127,6 +126,26 @@ function appointmentStatus(status?: string | null) {
 }
 
 function getSlotStatus(slot: ScheduleSlot) {
+  if (slot.unavailableReason === 'capacidade_esgotada' && !slot.appointment) {
+    return {
+      label: 'Sem vaga',
+      badgeClass: 'bg-amber-100 text-amber-800',
+      dotClass: 'border-amber-300 bg-amber-50',
+      cardClass: 'border-amber-200 bg-amber-50/40',
+      description: 'Capacidade diária esgotada',
+    }
+  }
+
+  if (slot.unavailableReason === 'horario_passado' && !slot.appointment) {
+    return {
+      label: 'Encerrado',
+      badgeClass: 'bg-slate-200 text-slate-600',
+      dotClass: 'border-slate-300 bg-slate-100',
+      cardClass: 'border-slate-200 bg-slate-50/80',
+      description: 'Horário já encerrado',
+    }
+  }
+
   if (slot.available || !slot.appointment) {
     return {
       label: 'Livre',
@@ -190,12 +209,11 @@ function getAgendaFormContext(agenda?: ScheduleAgenda, option?: AgendaFormOption
     metadata?.formVersion ||
     option?.latestVersion?.version ||
     null
-  const psychology = specialtyCode === 'psicologia' || agenda?.specialty.toLowerCase() === 'psicologia'
-  const dynamic = dynamicPsychologyFormsEnabled && psychology
+  const dynamic = Boolean(specialtyCode || metadata?.formTemplateId || option)
 
   return {
-    name: name || (dynamic ? 'Padrão de Psicologia' : 'Prontuário legado'),
-    detail: version ? `Versão ${version} publicada` : dynamic ? 'Definido ao agendar' : 'Motor clínico atual',
+    name: name || 'Formulário padrão da especialidade',
+    detail: version ? `Versão ${version} publicada` : 'Definido ao agendar',
     dynamic,
   }
 }
@@ -270,7 +288,10 @@ function DayButton({
   buttonRef?: Ref<HTMLButtonElement>
 }) {
   const free = data?.slots.filter((slot) => slot.available).length || 0
-  const occupied = (data?.slots.length || 0) - free
+  const occupied = data?.slots.filter((slot) => Boolean(slot.appointment)).length || 0
+  const past = data?.slots.filter(
+    (slot) => slot.unavailableReason === 'horario_passado' && !slot.appointment
+  ).length || 0
   const dateValue = parseInputDate(date)
 
   return (
@@ -312,6 +333,7 @@ function DayButton({
         <p className={cn('mt-1 truncate text-[10px]', selected ? 'text-slate-300' : 'text-slate-500')}>
           <strong className={cn('font-semibold', selected ? 'text-white' : 'text-cyan-700')}>{free}</strong> livres
           {occupied ? <> · <strong className={cn('font-semibold', selected ? 'text-white' : 'text-slate-700')}>{occupied}</strong> ocupados</> : null}
+          {past ? <> · <strong className={cn('font-semibold', selected ? 'text-white' : 'text-slate-500')}>{past}</strong> encerrados</> : null}
         </p>
       ) : (
         <p className={cn('mt-1 truncate text-[10px] font-medium', selected ? 'text-slate-300' : 'text-slate-400')}>Sem atendimento</p>
@@ -371,7 +393,7 @@ function AppointmentActionsMenu({
           role="menu"
           className="absolute right-0 top-11 z-30 w-52 rounded-lg border border-slate-200 bg-white p-1.5 shadow-xl"
         >
-          {dynamicPsychologyFormsEnabled && templateId ? (
+          {templateId ? (
             <Link
               href={`/formularios/${templateId}`}
               role="menuitem"
@@ -459,13 +481,16 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
   const selectedAgenda =
     calendarQuery.data?.agenda || agendasQuery.data?.agendas.find((agenda) => agenda.id === agendaId)
   const selectedAgendaMetadata = selectedAgenda as (ScheduleAgenda & AgendaRuntimeMetadata) | undefined
-  const agendaSpecialtyCode =
-    selectedAgendaMetadata?.specialtyCode ||
-    (selectedAgenda?.specialty.toLowerCase() === 'psicologia' ? 'psicologia' : '')
+  const agendaSpecialtyCode = selectedAgendaMetadata?.specialtyCode || selectedAgenda?.specialty
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '') || ''
   const agendaFormsQuery = useQuery({
     queryKey: ['agenda-published-form-options', agendaSpecialtyCode],
     queryFn: () => listPublishedAgendaForms(agendaSpecialtyCode),
-    enabled: dynamicPsychologyFormsEnabled && agendaSpecialtyCode === 'psicologia',
+    enabled: Boolean(agendaSpecialtyCode),
     retry: false,
   })
   const agendaFormOptions = agendaFormsQuery.data || []
@@ -477,23 +502,25 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
     : agendaFormOptions.find((item) => item.isDefault)
   const formContext = getAgendaFormContext(selectedAgenda, agendaFormOption)
   const configurableFormId = selectedAgendaMetadata?.formTemplateId || agendaFormOption?.id || null
-  const canConfigureForm =
-    dynamicPsychologyFormsEnabled && agendaSpecialtyCode === 'psicologia'
+  const canConfigureForm = Boolean(agendaSpecialtyCode)
   const selectedSlots = selectedDayData?.slots || []
   const visibleSlots = selectedSlots.filter((slot) => matchesFilter(slot, filter))
   const freeCount = selectedSlots.filter((slot) => slot.available).length
-  const occupiedCount = selectedSlots.length - freeCount
+  const occupiedCount = selectedSlots.filter((slot) => Boolean(slot.appointment)).length
+  const pastCount = selectedSlots.filter(
+    (slot) => slot.unavailableReason === 'horario_passado' && !slot.appointment
+  ).length
   const filterCounts: Record<SlotFilter, number> = {
     all: selectedSlots.length,
     free: freeCount,
     reserved: selectedSlots.filter(
-      (slot) => !slot.available && appointmentStatus(slot.appointment?.status) === 'reserved'
+      (slot) => Boolean(slot.appointment) && appointmentStatus(slot.appointment?.status) === 'reserved'
     ).length,
     in_progress: selectedSlots.filter(
-      (slot) => !slot.available && appointmentStatus(slot.appointment?.status) === 'in_progress'
+      (slot) => Boolean(slot.appointment) && appointmentStatus(slot.appointment?.status) === 'in_progress'
     ).length,
     completed: selectedSlots.filter(
-      (slot) => !slot.available && appointmentStatus(slot.appointment?.status) === 'completed'
+      (slot) => Boolean(slot.appointment) && appointmentStatus(slot.appointment?.status) === 'completed'
     ).length,
   }
 
@@ -691,6 +718,11 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
                   <span className="rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">
                     {occupiedCount} ocupados
                   </span>
+                  {pastCount ? (
+                    <span className="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
+                      {pastCount} encerrados
+                    </span>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -784,7 +816,9 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
                         'min-w-0 rounded-xl border px-3 py-3 sm:px-4',
                         slot.available
                           ? 'border-dashed shadow-none'
-                          : 'shadow-sm transition-shadow hover:shadow-md',
+                          : slot.unavailableReason === 'horario_passado' && !appointment
+                            ? 'shadow-none'
+                            : 'shadow-sm transition-shadow hover:shadow-md',
                         status.cardClass
                       )}
                     >
@@ -792,7 +826,13 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <h3 className={cn('truncate text-sm font-semibold', slot.available ? 'text-slate-700' : 'text-slate-950')}>
-                              {appointment?.patientName || 'Horário disponível'}
+                              {appointment?.patientName || (
+                                slot.unavailableReason === 'horario_passado'
+                                  ? 'Horário encerrado'
+                                  : slot.unavailableReason === 'capacidade_esgotada'
+                                    ? 'Capacidade do dia esgotada'
+                                    : 'Horário disponível'
+                              )}
                             </h3>
                             {!slot.available ? (
                               <span
@@ -806,7 +846,7 @@ export function AgendaCalendarView({ agendaId }: { agendaId: string }) {
                             ) : null}
                           </div>
                           <p className="mt-1 truncate text-xs text-slate-500">
-                            {appointment?.chiefComplaint || `${slot.shiftLabel} · disponível para agendamento`}
+                            {appointment?.chiefComplaint || `${slot.shiftLabel} · ${status.description}`}
                           </p>
 
                           {runtime &&

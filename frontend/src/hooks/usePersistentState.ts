@@ -4,13 +4,17 @@ import { useCallback, useEffect, useState } from 'react'
 
 export function usePersistentState<T>(key: string, initialValue: T) {
   const [value, setValue] = useState<T>(initialValue)
+  const [isLoaded, setIsLoaded] = useState(false)
 
   useEffect(() => {
+    setIsLoaded(false)
     try {
       const stored = window.localStorage.getItem(key)
       if (stored != null) setValue(JSON.parse(stored) as T)
     } catch {
       // Prefer the in-memory default when storage is unavailable or malformed.
+    } finally {
+      setIsLoaded(true)
     }
   }, [key])
 
@@ -31,5 +35,5 @@ export function usePersistentState<T>(key: string, initialValue: T) {
     [key]
   )
 
-  return [value, setPersistentValue] as const
+  return [value, setPersistentValue, isLoaded] as const
 }

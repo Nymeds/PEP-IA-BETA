@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { PSYCHOLOGY_FORM_PRESET } from '../presets/psychology-form.preset'
+import { GENERAL_CLINIC_FORM_PRESET } from '../presets/general-clinic-form.preset'
 import {
   ClinicalFormValidationError,
   parseDraftFormDefinition,
@@ -14,6 +15,43 @@ function presetCopy() {
 test('preset de Psicologia publica com dois documentos separados', () => {
   const parsed = parseFormDefinition(presetCopy())
   assert.deepEqual(parsed.documents.map((document) => document.kind).sort(), ['compartilhavel', 'restrito'])
+})
+
+test('preset de Clinica Geral publica com papeis clinicos obrigatorios', () => {
+  const parsed = parseFormDefinition(structuredClone(GENERAL_CLINIC_FORM_PRESET))
+  assert.equal(parsed.specialtyCode, 'clinica_geral')
+  const roles = new Set(parsed.documents.flatMap((document) =>
+    document.tabs.flatMap((tab) => tab.elements.map((field) => field.semanticRole))
+  ))
+  for (const role of [
+    'queixa_historia_clinica',
+    'antecedentes_clinicos',
+    'exame_fisico_sinais_vitais',
+    'diagnostico_hipoteses',
+    'plano_terapeutico',
+  ] as const) {
+    assert(roles.has(role), `Papel ausente no preset de Clinica Geral: ${role}`)
+  }
+})
+
+test('preserva icone SVG catalogado como token opcional do campo', () => {
+  const definition = presetCopy()
+  const field = definition.documents[0]!.tabs[0]!.elements[0]!
+  field.icon = 'Stethoscope'
+
+  const draft = parseDraftFormDefinition(definition)
+  const published = parseFormDefinition(definition)
+
+  assert.equal(draft.documents[0]!.tabs[0]!.elements[0]!.icon, 'Stethoscope')
+  assert.equal(published.documents[0]!.tabs[0]!.elements[0]!.icon, 'Stethoscope')
+})
+
+test('rejeita SVG bruto ou token inseguro no icone do campo', () => {
+  const definition = presetCopy()
+  definition.documents[0]!.tabs[0]!.elements[0]!.icon = '<svg onload=alert(1)>'
+
+  assert.throws(() => parseDraftFormDefinition(definition), /Icone de campo invalido/)
+  assert.throws(() => parseFormDefinition(definition), /Icone de campo invalido/)
 })
 
 test('bloqueia publicacao sem papel documental minimo', () => {

@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
 import { getPrisma } from '../lib/prisma'
 import { PSYCHOLOGY_FORM_PRESET, PSYCHOLOGY_PRESET_KEY } from '../presets/psychology-form.preset'
+import { GENERAL_CLINIC_FORM_PRESET, GENERAL_CLINIC_PRESET_KEY } from '../presets/general-clinic-form.preset'
 import {
   buildRuntimeManifest,
   ClinicalFormDefinition,
@@ -9,11 +10,41 @@ import {
 } from './clinical-forms.service'
 
 export const PSYCHOLOGY_SPECIALTY_CODE = 'psicologia'
+export const GENERAL_CLINIC_SPECIALTY_CODE = 'clinica_geral'
+
+const BASE_SPECIALTIES = [
+  {
+    code: PSYCHOLOGY_SPECIALTY_CODE,
+    name: 'Psicologia',
+    description: 'Atendimento psicologico com prontuario compartilhavel e registro restrito.',
+    preset: PSYCHOLOGY_FORM_PRESET,
+    presetKey: PSYCHOLOGY_PRESET_KEY,
+    templateDescription: 'Preset inicial completo e editavel para atendimentos de Psicologia.',
+  },
+  {
+    code: GENERAL_CLINIC_SPECIALTY_CODE,
+    name: 'Clínica Geral',
+    description: 'Atendimento médico geral com anamnese, exame, diagnóstico e conduta.',
+    preset: GENERAL_CLINIC_FORM_PRESET,
+    presetKey: GENERAL_CLINIC_PRESET_KEY,
+    templateDescription: 'Preset inicial completo e editável para atendimentos de Clínica Geral.',
+  },
+] as const
 
 export class FormTemplateRevisionConflictError extends Error {}
 
-export function isDynamicPsychologyEnabled(): boolean {
-  return process.env.DYNAMIC_FORMS_PSYCHOLOGY !== 'false'
+export class ScheduleFormConfigurationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ScheduleFormConfigurationError'
+  }
+}
+
+export class FormTemplateArchiveConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'FormTemplateArchiveConflictError'
+  }
 }
 
 function checksum(value: string): string {
@@ -35,91 +66,86 @@ function parseStoredJson<T>(value: string, fallback: T): T {
   }
 }
 
-export async function ensurePsychologySpecialty() {
-  return getPrisma().specialtyProfile.upsert({
-    where: { code: PSYCHOLOGY_SPECIALTY_CODE },
+export async function ensureBaseSpecialties() {
+  return Promise.all(BASE_SPECIALTIES.map((specialty) => getPrisma().specialtyProfile.upsert({
+    where: { code: specialty.code },
     update: {
-      name: 'Psicologia',
-      description: 'Atendimento psicologico com prontuario compartilhavel e registro restrito.',
-      dynamicFormsEnabled: isDynamicPsychologyEnabled(),
+      name: specialty.name,
+      description: specialty.description,
+      dynamicFormsEnabled: true,
     },
     create: {
-      code: PSYCHOLOGY_SPECIALTY_CODE,
-      name: 'Psicologia',
-      description: 'Atendimento psicologico com prontuario compartilhavel e registro restrito.',
-      dynamicFormsEnabled: isDynamicPsychologyEnabled(),
+      code: specialty.code,
+      name: specialty.name,
+      description: specialty.description,
+      dynamicFormsEnabled: true,
     },
-  })
+  })))
 }
 
 export async function ensureSpecialtyProfile(code: string, name: string) {
   if (!/^[a-z0-9][a-z0-9_-]{0,79}$/.test(code)) {
     throw new Error('Codigo de especialidade invalido')
   }
-  if (code === PSYCHOLOGY_SPECIALTY_CODE) return ensurePsychologySpecialty()
+  const baseSpecialty = BASE_SPECIALTIES.find((item) => item.code === code)
+  if (baseSpecialty) {
+    await ensureBaseSpecialties()
+    return getPrisma().specialtyProfile.findUniqueOrThrow({ where: { code } })
+  }
 
   return getPrisma().specialtyProfile.upsert({
     where: { code },
-    update: { name },
+    update: { name, dynamicFormsEnabled: true },
     create: {
       code,
       name,
-      description: `Especialidade legada: ${name}.`,
-      dynamicFormsEnabled: false,
+      description: `Especialidade clínica cadastrada para ${name}.`,
+      dynamicFormsEnabled: true,
     },
   })
 }
 
-export async function ensurePsychologyTemplateForUser(userId: string) {
-  if (!isDynamicPsychologyEnabled()) return null
-
-  await ensurePsychologySpecialty()
-  const definitionJson = JSON.stringify(PSYCHOLOGY_FORM_PRESET)
-  const runtimeManifestJson = JSON.stringify(buildRuntimeManifest(PSYCHOLOGY_FORM_PRESET))
+export async function ensureBaseFormTemplatesForUser(userId: string) {
+  await ensureBaseSpecialties()
   const prisma = getPrisma()
+  const templates = []
 
-  const template = await prisma.clinicalFormTemplate.upsert({
-    where: {
-      userId_sourceTemplateKey: {
+  for (const base of BASE_SPECIALTIES) {
+    const definitionJson = JSON.stringify(base.preset)
+    const runtimeManifestJson = JSON.stringify(buildRuntimeManifest(base.preset))
+    const template = await prisma.clinicalFormTemplate.upsert({
+      where: { userId_sourceTemplateKey: { userId, sourceTemplateKey: base.presetKey } },
+      update: {},
+      create: {
         userId,
-        sourceTemplateKey: PSYCHOLOGY_PRESET_KEY,
-      },
-    },
-    update: {},
-    create: {
-      userId,
-      specialtyCode: PSYCHOLOGY_SPECIALTY_CODE,
-      name: PSYCHOLOGY_FORM_PRESET.name,
-      description: 'Preset inicial completo e editavel para atendimentos de Psicologia.',
-      status: 'publicado',
-      origin: 'preset_sistema',
-      sourceTemplateKey: PSYCHOLOGY_PRESET_KEY,
-      draftDefinitionJson: definitionJson,
-      versions: {
-        create: {
-          version: 1,
-          definitionJson,
-          runtimeManifestJson,
-          checksum: checksum(definitionJson),
+        specialtyCode: base.code,
+        name: base.preset.name,
+        description: base.templateDescription,
+        status: 'publicado',
+        origin: 'preset_sistema',
+        sourceTemplateKey: base.presetKey,
+        draftDefinitionJson: definitionJson,
+        versions: {
+          create: {
+            version: 1,
+            definitionJson,
+            runtimeManifestJson,
+            checksum: checksum(definitionJson),
+          },
         },
       },
-    },
-  })
-
-  await prisma.clinicalFormDefault.upsert({
-    where: {
-      userId_specialtyCode: {
-        userId,
-        specialtyCode: PSYCHOLOGY_SPECIALTY_CODE,
-      },
-    },
-    update: {},
-    create: {
-      userId,
-      specialtyCode: PSYCHOLOGY_SPECIALTY_CODE,
-      templateId: template.id,
-    },
-  })
+    })
+    await prisma.clinicalFormDefault.upsert({
+      where: { userId_specialtyCode: { userId, specialtyCode: base.code } },
+      update: {},
+      create: { userId, specialtyCode: base.code, templateId: template.id },
+    })
+    await prisma.schedule.updateMany({
+      where: { userId, specialtyCode: base.code, formTemplateId: null },
+      data: { formTemplateId: template.id },
+    })
+    templates.push(template)
+  }
 
   await prisma.audioRetentionPolicy.upsert({
     where: { userId },
@@ -127,7 +153,100 @@ export async function ensurePsychologyTemplateForUser(userId: string) {
     create: { userId },
   })
 
-  return template
+  return templates
+}
+
+function inferBaseSpecialtyCode(name?: string | null) {
+  const normalized = (name || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('pt-BR')
+  if (normalized.includes('psicolog')) return PSYCHOLOGY_SPECIALTY_CODE
+  return GENERAL_CLINIC_SPECIALTY_CODE
+}
+
+/**
+ * Migra metadados antigos para o motor unico sem apagar as colunas historicas.
+ * O snapshot em ConsultationVersion preserva o estado anterior para auditoria.
+ */
+export async function migrateOwnedRecordsToDynamic(userId: string) {
+  const templates = await ensureBaseFormTemplatesForUser(userId)
+  if (!templates.length) return { schedules: 0, consultations: 0 }
+  const prisma = getPrisma()
+  const versionBySpecialty = new Map<string, {
+    templateId: string
+    versionId: string
+    definitionJson: string
+  }>()
+  for (const template of templates) {
+    const version = await prisma.clinicalFormTemplateVersion.findFirst({
+      where: { templateId: template.id },
+      orderBy: { version: 'desc' },
+    })
+    if (version) {
+      versionBySpecialty.set(template.specialtyCode, {
+        templateId: template.id,
+        versionId: version.id,
+        definitionJson: version.definitionJson,
+      })
+    }
+  }
+
+  let migratedSchedules = 0
+  const schedules = await prisma.schedule.findMany({ where: { userId } })
+  for (const schedule of schedules) {
+    const specialtyCode = schedule.specialtyCode || inferBaseSpecialtyCode(schedule.specialty)
+    const target = versionBySpecialty.get(specialtyCode)
+    if (!target) continue
+    if (schedule.specialtyCode === specialtyCode && schedule.formTemplateId === target.templateId) continue
+    await prisma.schedule.update({
+      where: { id: schedule.id },
+      data: { specialtyCode, formTemplateId: target.templateId },
+    })
+    migratedSchedules += 1
+  }
+
+  let migratedConsultations = 0
+  const consultations = await prisma.consultation.findMany({
+    where: {
+      userId,
+      OR: [{ formMode: { not: 'dynamic' } }, { formTemplateVersionId: null }],
+    },
+    include: { schedule: true },
+  })
+  for (const consultation of consultations) {
+    const specialtyCode = consultation.specialtyCode ||
+      consultation.schedule?.specialtyCode ||
+      inferBaseSpecialtyCode(consultation.schedule?.specialty)
+    const target = versionBySpecialty.get(specialtyCode)
+    if (!target) continue
+    await prisma.$transaction(async (tx) => {
+      const versionNumber = await tx.consultationVersion.count({
+        where: { consultationId: consultation.id },
+      })
+      await tx.consultationVersion.create({
+        data: {
+          consultationId: consultation.id,
+          version: versionNumber + 1,
+          snapshot: JSON.stringify(consultation),
+          transcript: consultation.transcript,
+          reason: 'Migracao do prontuario fixo para formulario versionado',
+        },
+      })
+      await tx.consultation.update({
+        where: { id: consultation.id },
+        data: {
+          formMode: 'dynamic',
+          specialtyCode,
+          formTemplateVersionId: target.versionId,
+          formDefinitionSnapshot: target.definitionJson,
+          formPinnedAt: new Date(),
+        },
+      })
+    })
+    migratedConsultations += 1
+  }
+  return { schedules: migratedSchedules, consultations: migratedConsultations }
 }
 
 interface TemplateRecordForDto {
@@ -151,6 +270,7 @@ interface TemplateRecordForDto {
     runtimeManifestJson?: string
   }>
   defaults: Array<{ id: string }>
+  _count: { schedules: number }
 }
 
 export function serializeFormTemplate(record: TemplateRecordForDto) {
@@ -163,6 +283,7 @@ export function serializeFormTemplate(record: TemplateRecordForDto) {
     status: record.status,
     origin: record.origin,
     isDefault: record.defaults.length > 0,
+    linkedScheduleCount: record._count.schedules,
     draftDefinition: parseStoredJson(record.draftDefinitionJson, null),
     latestVersion: latestVersion
       ? {
@@ -206,13 +327,14 @@ export function serializeFormTemplateVersion(record: {
 const templateInclude = (userId: string) => ({
   versions: { orderBy: { version: 'desc' as const } },
   defaults: { where: { userId }, select: { id: true } },
+  _count: { select: { schedules: true } },
 })
 
 export async function listOwnedFormTemplates(
   userId: string,
   filters?: { specialtyCode?: string; status?: string }
 ) {
-  await ensurePsychologyTemplateForUser(userId)
+  await ensureBaseFormTemplatesForUser(userId)
   return getPrisma().clinicalFormTemplate.findMany({
     where: {
       userId,
@@ -239,17 +361,19 @@ export async function createOwnedFormTemplate(input: {
   definition?: unknown
 }) {
   const specialtyCode = input.specialtyCode.trim().toLowerCase()
-  if (specialtyCode === PSYCHOLOGY_SPECIALTY_CODE) {
-    await ensurePsychologyTemplateForUser(input.userId)
-  }
-  const specialty = await getPrisma().specialtyProfile.findUnique({ where: { code: specialtyCode } })
-  if (!specialty?.dynamicFormsEnabled) {
-    throw new Error('Esta especialidade ainda nao possui formularios dinamicos habilitados')
-  }
+  await ensureBaseFormTemplatesForUser(input.userId)
+  await ensureSpecialtyProfile(
+    specialtyCode,
+    specialtyCode.split(/[_-]+/).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ')
+  )
 
+  const baseDefinition = BASE_SPECIALTIES.find((item) => item.code === specialtyCode)?.preset || {
+    ...GENERAL_CLINIC_FORM_PRESET,
+    specialtyCode,
+  }
   const definition = input.definition
     ? parseDraftFormDefinition(input.definition)
-    : withTemplateName(PSYCHOLOGY_FORM_PRESET, input.name)
+    : withTemplateName(baseDefinition, input.name)
   if (definition.specialtyCode !== specialtyCode) {
     throw new Error('A especialidade da definicao difere da especialidade do formulario')
   }
@@ -397,8 +521,28 @@ export async function setOwnedDefaultFormTemplate(userId: string, templateId: st
 export async function archiveOwnedFormTemplate(userId: string, templateId: string) {
   const existing = await getOwnedFormTemplate(userId, templateId)
   if (!existing) return null
-  if (existing.defaults.length > 0) {
-    throw new Error('Defina outro formulario padrao antes de arquivar este formulario')
+  const isDefault = existing.defaults.length > 0
+  const linkedScheduleCount = existing._count.schedules
+  if (isDefault && linkedScheduleCount > 0) {
+    const agendas = linkedScheduleCount === 1
+      ? 'a agenda vinculada'
+      : `as ${linkedScheduleCount} agendas vinculadas`
+    throw new FormTemplateArchiveConflictError(
+      `Defina outro formulário padrão e reassocie ${agendas} antes de arquivar este formulário`
+    )
+  }
+  if (isDefault) {
+    throw new FormTemplateArchiveConflictError(
+      'Defina outro formulário padrão antes de arquivar este formulário'
+    )
+  }
+  if (linkedScheduleCount > 0) {
+    const agendas = linkedScheduleCount === 1
+      ? 'a agenda vinculada'
+      : `as ${linkedScheduleCount} agendas vinculadas`
+    throw new FormTemplateArchiveConflictError(
+      `Reassocie ${agendas} antes de arquivar este formulário`
+    )
   }
 
   return getPrisma().clinicalFormTemplate.update({
@@ -422,15 +566,17 @@ export async function resolveScheduleTemplate(input: {
   specialtyCode?: string | null
   formTemplateId?: string | null
 }) {
-  if (input.specialtyCode !== PSYCHOLOGY_SPECIALTY_CODE || !isDynamicPsychologyEnabled()) {
+  if (!input.specialtyCode) {
     return null
   }
 
-  await ensurePsychologyTemplateForUser(input.userId)
+  await ensureBaseFormTemplatesForUser(input.userId)
   if (input.formTemplateId) {
     const selected = await getOwnedFormTemplate(input.userId, input.formTemplateId)
     if (!selected || selected.specialtyCode !== input.specialtyCode || selected.status !== 'publicado') {
-      throw new Error('Selecione um formulario publicado da especialidade desta agenda')
+      throw new ScheduleFormConfigurationError(
+        'Selecione um formulario publicado da especialidade desta agenda'
+      )
     }
     return selected
   }
@@ -445,7 +591,9 @@ export async function resolveScheduleTemplate(input: {
     include: { template: { include: templateInclude(input.userId) } },
   })
   if (!defaultRecord?.template || defaultRecord.template.status !== 'publicado') {
-    throw new Error('Defina um formulario publicado como padrao para esta especialidade')
+    throw new ScheduleFormConfigurationError(
+      'Defina um formulario publicado como padrao para esta especialidade'
+    )
   }
   return defaultRecord.template
 }
@@ -458,6 +606,10 @@ export async function resolvePublishedVersionForSchedule(input: {
   const template = await resolveScheduleTemplate(input)
   if (!template) return null
   const version = template.versions[0]
-  if (!version) throw new Error('O formulario selecionado ainda nao possui versao publicada')
+  if (!version) {
+    throw new ScheduleFormConfigurationError(
+      'O formulario selecionado ainda nao possui versao publicada'
+    )
+  }
   return { template, version }
 }

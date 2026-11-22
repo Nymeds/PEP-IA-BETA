@@ -12,6 +12,7 @@ import {
   serializeFormTemplateVersion,
   setOwnedDefaultFormTemplate,
   updateOwnedFormTemplate,
+  FormTemplateArchiveConflictError,
   FormTemplateRevisionConflictError,
 } from '../services/form-templates.service'
 
@@ -43,7 +44,10 @@ interface CopyTemplateBody {
 }
 
 function statusForError(error: unknown): number {
-  if (error instanceof FormTemplateRevisionConflictError) return 409
+  if (
+    error instanceof FormTemplateRevisionConflictError ||
+    error instanceof FormTemplateArchiveConflictError
+  ) return 409
   if (error instanceof ClinicalFormValidationError) return 422
   return 400
 }

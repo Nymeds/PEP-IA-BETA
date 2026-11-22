@@ -6,13 +6,21 @@ import { api } from '@/services/api'
 export type RecordingState = 'idle' | 'recording' | 'processing'
 export type TranscriptionMode = 'none' | 'realtime' | 'local'
 
+export interface TranscriptCompletionContext {
+  source: 'realtime' | 'local'
+  alreadyPersisted: boolean
+  payload?: Record<string, unknown>
+  fullTranscript?: string | null
+}
+
 interface UseRealtimeTranscriptionOptions {
   consultationId: string
   commitIntervalMs?: number
+  localChunkIntervalMs?: number
   onTranscriptCompleted: (
     text: string,
     itemId: string,
-    payload?: Record<string, unknown>
+    context: TranscriptCompletionContext
   ) => Promise<void>
   onStop?: (fullBlob: Blob, context: { mode: Exclude<TranscriptionMode, 'none'> }) => Promise<void>
 }
@@ -31,6 +39,7 @@ function sleep(ms: number) {
 export function useRealtimeTranscription({
   consultationId,
   commitIntervalMs = 8000,
+  localChunkIntervalMs = 5000,
   onTranscriptCompleted,
   onStop,
 }: UseRealtimeTranscriptionOptions) {
@@ -41,14 +50,23 @@ export function useRealtimeTranscription({
 
   const streamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
+  const localChunkRecorderRef = useRef<MediaRecorder | null>(null)
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
   const commitTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const localChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isStartingRef = useRef(false)
   const audioChunksRef = useRef<Blob[]>([])
+  const bufferedLocalChunksRef = useRef<Array<{ blob: Blob; itemId: string }>>([])
+  const localChunkQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const localChunkDispositionRef = useRef<'buffer' | 'transcribe' | 'discard'>('discard')
+  const localChunkSessionRef = useRef(0)
+  const localChunkSequenceRef = useRef(0)
+  const discardedLocalRecordersRef = useRef(new WeakSet<MediaRecorder>())
   const partialItemsRef = useRef(new Map<string, string>())
   const pendingPersistsRef = useRef(new Set<Promise<void>>())
   const modeRef = useRef<TranscriptionMode>('none')
+  const fallbackActivatedRef = useRef(false)
   const sessionAbortRef = useRef<AbortController | null>(null)
   const onStopRef = useRef(onStop)
 
@@ -74,6 +92,156 @@ export function useRealtimeTranscription({
       pendingPersistsRef.current.delete(promise)
     })
   }, [])
+
+  const enqueueLocalChunk = useCallback((chunk: { blob: Blob; itemId: string }) => {
+    const transcribe = async () => {
+      const result = await api.consultations.transcribeChunk(consultationId, chunk.blob)
+      const text = result.chunkTranscript.trim()
+      if (!text) return
+
+      await onTranscriptCompleted(text, chunk.itemId, {
+        source: 'local',
+        alreadyPersisted: true,
+        fullTranscript: result.fullTranscript,
+      })
+    }
+
+    const next = localChunkQueueRef.current.then(transcribe, transcribe)
+    localChunkQueueRef.current = next.catch((error) => {
+      console.error('Erro ao transcrever segmento no modo local:', error)
+      setConnectionError(
+        'Um segmento não pôde ser transcrito incrementalmente. O áudio completo continua preservado.'
+      )
+    })
+  }, [consultationId, onTranscriptCompleted])
+
+  const startLocalChunkRecorder = useCallback(() => {
+    const stream = streamRef.current
+    if (
+      !stream ||
+      !recorderRef.current ||
+      localChunkRecorderRef.current ||
+      localChunkDispositionRef.current === 'discard'
+    ) {
+      return
+    }
+
+    const sessionId = localChunkSessionRef.current
+
+    const startSegment = () => {
+      if (
+        localChunkSessionRef.current !== sessionId ||
+        !recorderRef.current ||
+        localChunkRecorderRef.current ||
+        localChunkDispositionRef.current === 'discard'
+      ) {
+        return
+      }
+
+      const mimeType = recorderRef.current.mimeType || 'audio/webm'
+      const recorder = new MediaRecorder(stream, { mimeType })
+      const parts: Blob[] = []
+      localChunkRecorderRef.current = recorder
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) parts.push(event.data)
+      }
+
+      const timer = setTimeout(() => {
+        if (recorder.state !== 'inactive') recorder.stop()
+      }, localChunkIntervalMs)
+      localChunkTimerRef.current = timer
+
+      recorder.onstop = () => {
+        clearTimeout(timer)
+        if (localChunkTimerRef.current === timer) localChunkTimerRef.current = null
+        if (localChunkRecorderRef.current === recorder) localChunkRecorderRef.current = null
+
+        const shouldDiscard = discardedLocalRecordersRef.current.has(recorder)
+        discardedLocalRecordersRef.current.delete(recorder)
+
+        if (!shouldDiscard && parts.length > 0) {
+          const chunk = {
+            blob: new Blob(parts, { type: mimeType }),
+            itemId: `local-${sessionId}-${++localChunkSequenceRef.current}`,
+          }
+
+          if (localChunkDispositionRef.current === 'buffer') {
+            bufferedLocalChunksRef.current.push(chunk)
+          } else if (localChunkDispositionRef.current === 'transcribe') {
+            enqueueLocalChunk(chunk)
+          }
+        }
+
+        if (
+          localChunkSessionRef.current === sessionId &&
+          recorderRef.current &&
+          localChunkDispositionRef.current !== 'discard'
+        ) {
+          void Promise.resolve().then(startSegment)
+        }
+      }
+
+      recorder.start()
+    }
+
+    startSegment()
+  }, [enqueueLocalChunk, localChunkIntervalMs])
+
+  const activateLocalChunkTranscription = useCallback(() => {
+    fallbackActivatedRef.current = true
+    localChunkDispositionRef.current = 'transcribe'
+
+    const buffered = bufferedLocalChunksRef.current.splice(0)
+    buffered.forEach(enqueueLocalChunk)
+    startLocalChunkRecorder()
+  }, [enqueueLocalChunk, startLocalChunkRecorder])
+
+  const discardBufferedLocalChunks = useCallback(() => {
+    localChunkDispositionRef.current = 'discard'
+    bufferedLocalChunksRef.current = []
+
+    if (localChunkTimerRef.current) {
+      clearTimeout(localChunkTimerRef.current)
+      localChunkTimerRef.current = null
+    }
+
+    const recorder = localChunkRecorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      discardedLocalRecordersRef.current.add(recorder)
+      recorder.stop()
+    }
+  }, [])
+
+  const stopLocalChunkRecorder = useCallback(async (shouldTranscribe: boolean) => {
+    localChunkSessionRef.current += 1
+    localChunkDispositionRef.current = shouldTranscribe ? 'transcribe' : 'discard'
+
+    if (shouldTranscribe) {
+      const buffered = bufferedLocalChunksRef.current.splice(0)
+      buffered.forEach(enqueueLocalChunk)
+    } else {
+      bufferedLocalChunksRef.current = []
+    }
+
+    if (localChunkTimerRef.current) {
+      clearTimeout(localChunkTimerRef.current)
+      localChunkTimerRef.current = null
+    }
+
+    const recorder = localChunkRecorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      if (!shouldTranscribe) discardedLocalRecordersRef.current.add(recorder)
+      await new Promise<void>((resolve) => {
+        recorder.addEventListener('stop', () => resolve(), { once: true })
+        recorder.stop()
+      })
+    } else if (recorder && localChunkRecorderRef.current === recorder) {
+      localChunkRecorderRef.current = null
+    }
+
+    await localChunkQueueRef.current
+  }, [enqueueLocalChunk])
 
   const sendRealtimeEvent = useCallback((event: Record<string, unknown>) => {
     const channel = dataChannelRef.current
@@ -104,14 +272,13 @@ export function useRealtimeTranscription({
   }, [cleanupRealtimeConnection])
 
   const switchToLocalFallback = useCallback((message: string) => {
-    // O fallback não envia chunks continuamente: o áudio inteiro é enviado
-    // ao parar a gravação, em ConsultationView.handleStop.
     cleanupRealtimeConnection()
+    activateLocalChunkTranscription()
     modeRef.current = 'local'
     setMode('local')
     setConnectionError(message)
     setState('recording')
-  }, [cleanupRealtimeConnection])
+  }, [activateLocalChunkTranscription, cleanupRealtimeConnection])
 
   const waitForPendingTranscripts = useCallback(async (timeoutMs: number) => {
     const deadline = Date.now() + timeoutMs
@@ -211,7 +378,11 @@ export function useRealtimeTranscription({
         if (!text) return
 
         const persistPromise = Promise.resolve(
-          onTranscriptCompleted(text, itemId, payload as Record<string, unknown>)
+          onTranscriptCompleted(text, itemId, {
+            source: 'realtime',
+            alreadyPersisted: false,
+            payload: payload as Record<string, unknown>,
+          })
         ).catch((error) => {
           console.error('Erro ao persistir transcricao realtime:', error)
         })
@@ -230,6 +401,12 @@ export function useRealtimeTranscription({
     sessionAbortRef.current?.abort()
     sessionAbortRef.current = sessionController
     audioChunksRef.current = []
+    bufferedLocalChunksRef.current = []
+    localChunkQueueRef.current = Promise.resolve()
+    localChunkDispositionRef.current = 'buffer'
+    localChunkSessionRef.current += 1
+    localChunkSequenceRef.current = 0
+    fallbackActivatedRef.current = false
     partialItemsRef.current.clear()
     setLiveTranscript('')
     setConnectionError(null)
@@ -262,6 +439,7 @@ export function useRealtimeTranscription({
       }
       recorderRef.current = recorder
       recorder.start()
+      startLocalChunkRecorder()
       modeRef.current = 'local'
       setMode('local')
       setState('recording')
@@ -312,7 +490,11 @@ export function useRealtimeTranscription({
 
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: await sdpResponse.text() })
         await waitForDataChannelOpen(dataChannel)
+        if (fallbackActivatedRef.current || sessionController.signal.aborted || !recorderRef.current) {
+          return
+        }
 
+        discardBufferedLocalChunks()
         modeRef.current = 'realtime'
         setMode('realtime')
 
@@ -330,12 +512,9 @@ export function useRealtimeTranscription({
         )
       }
     } catch (error) {
+      await stopLocalChunkRecorder(false)
+      await stopLocalRecorder()
       cleanupRealtimeResources()
-      const maybeRecorder = recorderRef.current
-      recorderRef.current = null
-      if (maybeRecorder && maybeRecorder.state !== 'inactive') {
-        maybeRecorder.stop()
-      }
       setState('idle')
       setMode('none')
       modeRef.current = 'none'
@@ -347,9 +526,13 @@ export function useRealtimeTranscription({
     cleanupRealtimeResources,
     commitIntervalMs,
     consultationId,
+    discardBufferedLocalChunks,
     handleRealtimeMessage,
     sendRealtimeEvent,
+    startLocalChunkRecorder,
     state,
+    stopLocalChunkRecorder,
+    stopLocalRecorder,
     switchToLocalFallback,
     waitForDataChannelOpen,
   ])
@@ -374,6 +557,7 @@ export function useRealtimeTranscription({
       await waitForPendingTranscripts(1600)
     }
 
+    await stopLocalChunkRecorder(completedMode === 'local')
     const fullBlob = await stopLocalRecorder()
     cleanupRealtimeResources()
     partialItemsRef.current.clear()
@@ -392,6 +576,7 @@ export function useRealtimeTranscription({
     cleanupRealtimeResources,
     sendRealtimeEvent,
     state,
+    stopLocalChunkRecorder,
     stopLocalRecorder,
     waitForPendingTranscripts,
   ])
@@ -403,6 +588,7 @@ export function useRealtimeTranscription({
       sessionAbortRef.current = null
       const completedMode = modeRef.current === 'realtime' ? 'realtime' : 'local'
       void (async () => {
+        await stopLocalChunkRecorder(completedMode === 'local')
         const fullBlob = await stopLocalRecorder()
         cleanupRealtimeResources()
         partialItems.clear()
@@ -413,7 +599,7 @@ export function useRealtimeTranscription({
         }
       })()
     }
-  }, [cleanupRealtimeResources, stopLocalRecorder])
+  }, [cleanupRealtimeResources, stopLocalChunkRecorder, stopLocalRecorder])
 
   return {
     state,

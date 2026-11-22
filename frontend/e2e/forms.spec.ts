@@ -110,7 +110,7 @@ function invalidDefinition(name = 'Rascunho incompleto'): ClinicalFormDefinition
 function template(
   id: string,
   definition: ClinicalFormDefinition,
-  options?: { status?: ClinicalFormTemplate['status']; isDefault?: boolean; version?: number }
+  options?: { status?: ClinicalFormTemplate['status']; isDefault?: boolean; version?: number; linkedScheduleCount?: number }
 ): ClinicalFormTemplate {
   const version = options?.version ?? 1
   const latestVersion: ClinicalFormVersionSummary | null = version
@@ -123,6 +123,7 @@ function template(
     status: options?.status || 'publicado',
     origin: id === 'seed' ? 'preset_sistema' : 'usuario',
     isDefault: options?.isDefault ?? id === 'seed',
+    linkedScheduleCount: options?.linkedScheduleCount ?? (id === 'seed' ? 1 : 0),
     draftDefinition: definition,
     latestVersion,
     versionCount: version,
@@ -138,6 +139,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 interface MockFormsState {
   patches: Array<{ id: string; definition: ClinicalFormDefinition }>
   publishRequests: string[]
+  archiveRequests: string[]
   templates: Map<string, ClinicalFormTemplate>
 }
 
@@ -161,7 +163,7 @@ async function mockAuthenticatedForms(page: Page): Promise<MockFormsState> {
 
   const templates = new Map<string, ClinicalFormTemplate>()
   templates.set('seed', template('seed', validDefinition(), { isDefault: true, version: 1 }))
-  const state: MockFormsState = { patches: [], publishRequests: [], templates }
+  const state: MockFormsState = { patches: [], publishRequests: [], archiveRequests: [], templates }
 
   await page.route('**/api/form-templates**', async (route) => {
     const request = route.request()
@@ -224,6 +226,10 @@ async function mockAuthenticatedForms(page: Page): Promise<MockFormsState> {
         },
       }, 201)
     }
+    if (action === 'archive' && method === 'POST') {
+      state.archiveRequests.push(id)
+      return fulfillJson(route, { template: { ...current, status: 'arquivado' } })
+    }
     if (action === 'versions') return fulfillJson(route, { items: [] })
     return fulfillJson(route, { template: current })
   })
@@ -231,12 +237,24 @@ async function mockAuthenticatedForms(page: Page): Promise<MockFormsState> {
   return state
 }
 
+test('explica e bloqueia o arquivamento do formulário padrão', async ({ page }) => {
+  const state = await mockAuthenticatedForms(page)
+
+  await page.goto('/formularios')
+  await page.getByRole('button', { name: 'Ações de Prontuário E2E' }).click()
+
+  const archiveAction = page.getByRole('menuitem', { name: /Arquivar/ })
+  await expect(archiveAction).toBeDisabled()
+  await expect(page.getByText('Troque o padrão e reassocie 1 agenda')).toBeVisible()
+  expect(state.archiveRequests).toEqual([])
+})
+
 test('lista, cria e edita um rascunho, mas bloqueia publicação sem conteúdo mínimo', async ({ page }) => {
   test.setTimeout(60_000)
   const state = await mockAuthenticatedForms(page)
 
   await page.goto('/formularios')
-  await expect(page.getByRole('heading', { name: 'Prontuários de Psicologia' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Formulários clínicos' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Prontuário E2E' })).toBeVisible()
   await expect(page.getByText('Padrão', { exact: true })).toBeVisible()
 
@@ -271,7 +289,7 @@ test('publica explicitamente uma nova versão quando o conteúdo mínimo está c
   expect(state.publishRequests).toEqual(['seed'])
 })
 
-test('agenda de Psicologia oferece apenas formulários publicados e mostra a versão', async ({ page }) => {
+test('nova agenda oferece apenas formulários publicados da especialidade e mostra a versão', async ({ page }) => {
   await mockAuthenticatedForms(page)
   await page.route('**/api/schedule/agendas', (route) => fulfillJson(route, { agendas: [] }))
 
@@ -279,10 +297,10 @@ test('agenda de Psicologia oferece apenas formulários publicados e mostra a ver
   await expect(page.getByRole('heading', { name: 'Gerenciamento de agendas' })).toBeVisible()
   await page.getByRole('button', { name: 'Nova agenda' }).click()
 
-  const selector = page.getByLabel('Formulário publicado')
+  const selector = page.getByLabel('Prontuário publicado')
   await expect(selector).toBeVisible()
-  await expect(selector.getByRole('option', { name: /Prontuário E2E.*v1/ })).toBeAttached()
+  await expect(selector.locator('option[value="seed"]')).toHaveText(/Prontuário E2E.*v1/)
   await selector.selectOption('seed')
   await expect(selector).toHaveValue('seed')
-  await expect(page.getByText('Prontuário E2E', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText(/Em uso: Prontuário E2E · v1/)).toBeVisible()
 })

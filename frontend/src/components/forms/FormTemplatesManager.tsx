@@ -33,6 +33,15 @@ import type {
 type FilterStatus = FormTemplateStatus | 'all'
 type NameDialog = { mode: 'create' } | { mode: 'rename'; template: ClinicalFormTemplate }
 
+const BASE_SPECIALTIES = [
+  { code: 'clinica_geral', label: 'Clínica Geral', defaultName: 'Meu prontuário de Clínica Geral' },
+  { code: 'psicologia', label: 'Psicologia', defaultName: 'Meu prontuário de Psicologia' },
+] as const
+
+function specialtyLabel(code: string) {
+  return BASE_SPECIALTIES.find((item) => item.code === code)?.label || code.replaceAll('_', ' ')
+}
+
 const FILTERS: { id: FilterStatus; label: string }[] = [
   { id: 'all', label: 'Todos' },
   { id: 'rascunho', label: 'Rascunhos' },
@@ -60,6 +69,40 @@ function formatDate(value: string) {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value))
+}
+
+interface ArchiveRestriction {
+  title: string
+  description: string
+  hint: string
+}
+
+function getArchiveRestriction(template: ClinicalFormTemplate): ArchiveRestriction | null {
+  const linkedScheduleCount = template.linkedScheduleCount || 0
+  if (template.isDefault && linkedScheduleCount > 0) {
+    const agendas = linkedScheduleCount === 1 ? 'a agenda vinculada' : `as ${linkedScheduleCount} agendas vinculadas`
+    return {
+      title: 'Formulário em uso não pode ser arquivado',
+      description: `Defina outro formulário como padrão e reassocie ${agendas} em Configurações antes de arquivar.`,
+      hint: `Troque o padrão e reassocie ${linkedScheduleCount} agenda${linkedScheduleCount === 1 ? '' : 's'}`,
+    }
+  }
+  if (template.isDefault) {
+    return {
+      title: 'Formulário padrão não pode ser arquivado',
+      description: 'Publique outro formulário da mesma especialidade e defina-o como padrão primeiro.',
+      hint: 'Troque o formulário padrão primeiro',
+    }
+  }
+  if (linkedScheduleCount > 0) {
+    const agendas = linkedScheduleCount === 1 ? 'a agenda vinculada' : `as ${linkedScheduleCount} agendas vinculadas`
+    return {
+      title: 'Formulário vinculado a agendas não pode ser arquivado',
+      description: `Reassocie ${agendas} em Configurações antes de arquivar.`,
+      hint: `Reassocie ${linkedScheduleCount} agenda${linkedScheduleCount === 1 ? '' : 's'} primeiro`,
+    }
+  }
+  return null
 }
 
 function VersionsDialog({ template, onClose }: { template: ClinicalFormTemplate; onClose: () => void }) {
@@ -140,9 +183,14 @@ function NameDialog({
   dialog: NameDialog
   busy: boolean
   onClose: () => void
-  onSubmit: (name: string) => void
+  onSubmit: (name: string, specialtyCode: string) => void
 }) {
-  const [name, setName] = useState(dialog.mode === 'rename' ? dialog.template.name : 'Meu prontuário de Psicologia')
+  const [specialtyCode, setSpecialtyCode] = useState(
+    dialog.mode === 'rename' ? dialog.template.specialtyCode : BASE_SPECIALTIES[0].code
+  )
+  const [name, setName] = useState(
+    dialog.mode === 'rename' ? dialog.template.name : BASE_SPECIALTIES[0].defaultName
+  )
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -165,7 +213,7 @@ function NameDialog({
         onMouseDown={(event) => event.stopPropagation()}
         onSubmit={(event) => {
           event.preventDefault()
-          if (name.trim()) onSubmit(name.trim())
+          if (name.trim()) onSubmit(name.trim(), specialtyCode)
         }}
       >
         <h2 id="name-dialog-title" className="text-base font-semibold text-slate-950">
@@ -173,10 +221,29 @@ function NameDialog({
         </h2>
         <p className="mt-1 text-sm text-slate-500">
           {dialog.mode === 'create'
-            ? 'O novo formulário será criado como rascunho para Psicologia.'
+            ? 'Escolha a especialidade. O formulário será criado a partir do respectivo modelo base.'
             : 'O histórico publicado continuará preservado.'}
         </p>
-        <label className="mt-5 block">
+        {dialog.mode === 'create' ? (
+          <label className="mt-5 block">
+            <span className="form-label">Especialidade</span>
+            <select
+              className="form-input"
+              value={specialtyCode}
+              onChange={(event) => {
+                const nextCode = event.target.value
+                setSpecialtyCode(nextCode)
+                const specialty = BASE_SPECIALTIES.find((item) => item.code === nextCode)
+                if (specialty) setName(specialty.defaultName)
+              }}
+            >
+              {BASE_SPECIALTIES.map((specialty) => (
+                <option key={specialty.code} value={specialty.code}>{specialty.label}</option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <label className={dialog.mode === 'create' ? 'mt-4 block' : 'mt-5 block'}>
           <span className="form-label">Nome</span>
           <input
             ref={inputRef}
@@ -230,7 +297,8 @@ export function FormTemplatesManager() {
   }
 
   const createMutation = useMutation({
-    mutationFn: (name: string) => formsApi.create({ name, specialtyCode: 'psicologia' }),
+    mutationFn: ({ name, specialtyCode }: { name: string; specialtyCode: string }) =>
+      formsApi.create({ name, specialtyCode }),
     onSuccess: ({ template }) => {
       setNameDialog(null)
       notify('success', 'Rascunho criado', 'Personalize os campos e publique quando estiver pronto.')
@@ -276,6 +344,12 @@ export function FormTemplatesManager() {
     action: 'copy' | 'publish' | 'default' | 'archive',
     template: ClinicalFormTemplate
   ) => {
+    const archiveRestriction = getArchiveRestriction(template)
+    if (action === 'archive' && archiveRestriction) {
+      setOpenMenuId(null)
+      notify('info', archiveRestriction.title, archiveRestriction.description)
+      return
+    }
     if (action === 'archive') {
       const accepted = await confirm({
         title: 'Arquivar formulário?',
@@ -303,8 +377,8 @@ export function FormTemplatesManager() {
           dialog={nameDialog}
           busy={createMutation.isPending || renameMutation.isPending}
           onClose={() => setNameDialog(null)}
-          onSubmit={(name) => {
-            if (nameDialog.mode === 'create') createMutation.mutate(name)
+          onSubmit={(name, specialtyCode) => {
+            if (nameDialog.mode === 'create') createMutation.mutate({ name, specialtyCode })
             else renameMutation.mutate({ id: nameDialog.template.id, name })
           }}
         />
@@ -317,7 +391,7 @@ export function FormTemplatesManager() {
             <Wrench className="h-4 w-4" aria-hidden="true" />
             Meu formulário
           </div>
-          <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">Prontuários de Psicologia</h1>
+          <h1 className="text-2xl font-bold text-slate-950 sm:text-3xl">Formulários clínicos</h1>
           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-600">
             Organize campos, permissões da IA e documentos clínicos. Agendamentos usam sempre uma versão publicada.
           </p>
@@ -344,7 +418,7 @@ export function FormTemplatesManager() {
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center gap-3">
             <div className="rounded-lg bg-primary-50 p-2 text-primary-700"><Star className="h-4 w-4" /></div>
-            <div><p className="truncate text-sm font-semibold text-slate-950">{templates.find((item) => item.isDefault)?.name || 'Não definido'}</p><p className="text-xs text-slate-500">Padrão para Psicologia</p></div>
+            <div><p className="text-sm font-semibold text-slate-950">{templates.filter((item) => item.isDefault).length}</p><p className="text-xs text-slate-500">Padrões por especialidade</p></div>
           </div>
         </div>
       </section>
@@ -382,15 +456,17 @@ export function FormTemplatesManager() {
           <div className="card">
             <EmptyState
               title={filter === 'all' ? 'Nenhum formulário encontrado' : `Nenhum formulário em “${FILTERS.find((item) => item.id === filter)?.label}”`}
-              description="Crie um rascunho a partir do modelo de Psicologia e personalize-o no canvas."
+              description="Crie um rascunho a partir de um modelo base e personalize-o no canvas."
               action={<Button variant="primary" onClick={() => setNameDialog({ mode: 'create' })}><FilePlus2 className="h-4 w-4" />Novo formulário</Button>}
             />
           </div>
         ) : null}
 
         <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-          {visibleTemplates.map((template) => (
-            <article key={template.id} className="relative flex min-h-64 flex-col overflow-visible rounded-xl border border-slate-200 bg-white shadow-sm">
+          {visibleTemplates.map((template) => {
+            const archiveRestriction = getArchiveRestriction(template)
+            return (
+              <article key={template.id} className="relative flex min-h-64 flex-col overflow-visible rounded-xl border border-slate-200 bg-white shadow-sm">
               <div className="flex items-start justify-between gap-3 p-5">
                 <div className="flex min-w-0 items-start gap-3">
                   <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-50 text-violet-700">
@@ -402,7 +478,7 @@ export function FormTemplatesManager() {
                       {template.isDefault ? <span className="inline-flex items-center gap-1 rounded-full border border-primary-200 bg-primary-50 px-2 py-0.5 text-[11px] font-semibold text-primary-700"><Star className="h-3 w-3" />Padrão</span> : null}
                     </div>
                     <h2 className="mt-2 truncate text-base font-semibold text-slate-950" title={template.name}>{template.name}</h2>
-                    <p className="mt-0.5 text-xs capitalize text-slate-500">{template.specialtyCode}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{specialtyLabel(template.specialtyCode)}</p>
                   </div>
                 </div>
 
@@ -411,12 +487,30 @@ export function FormTemplatesManager() {
                     <MoreHorizontal className="h-4 w-4" />
                   </Button>
                   {openMenuId === template.id ? (
-                    <div className="absolute right-0 top-10 z-20 w-52 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" role="menu">
+                    <div className="absolute right-0 top-10 z-20 w-64 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" role="menu">
                       <button className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-slate-100" role="menuitem" onClick={() => setNameDialog({ mode: 'rename', template })}><Pencil className="h-4 w-4" />Renomear</button>
                       <button className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-slate-100" role="menuitem" onClick={() => void runCommand('copy', template)}><Copy className="h-4 w-4" />Criar cópia</button>
                       <button className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-slate-100" role="menuitem" onClick={() => { setOpenMenuId(null); setVersionsTemplate(template) }}><FileClock className="h-4 w-4" />Ver versões</button>
                       {template.status === 'publicado' && !template.isDefault ? <button className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-slate-100" role="menuitem" onClick={() => void runCommand('default', template)}><Star className="h-4 w-4" />Definir como padrão</button> : null}
-                      {template.status !== 'arquivado' ? <button className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50" role="menuitem" onClick={() => void runCommand('archive', template)}><Archive className="h-4 w-4" />Arquivar</button> : null}
+                      {template.status !== 'arquivado' ? (
+                        archiveRestriction ? (
+                          <button
+                            type="button"
+                            className="flex w-full cursor-not-allowed items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-slate-400"
+                            role="menuitem"
+                            disabled
+                            title={archiveRestriction.description}
+                          >
+                            <Archive className="h-4 w-4 shrink-0" />
+                            <span>
+                              Arquivar
+                              <span className="block text-[11px] leading-4 text-slate-400">{archiveRestriction.hint}</span>
+                            </span>
+                          </button>
+                        ) : (
+                          <button className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50" role="menuitem" onClick={() => void runCommand('archive', template)}><Archive className="h-4 w-4" />Arquivar</button>
+                        )
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -447,8 +541,9 @@ export function FormTemplatesManager() {
                   <Button className="flex-1" onClick={() => setVersionsTemplate(template)}><Clock3 className="h-4 w-4" />Versões</Button>
                 )}
               </div>
-            </article>
-          ))}
+              </article>
+            )
+          })}
         </div>
       </section>
     </div>

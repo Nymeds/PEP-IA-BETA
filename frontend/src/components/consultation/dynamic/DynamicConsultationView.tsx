@@ -5,48 +5,84 @@ import { useRouter } from 'next/navigation'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
+  BrainCircuit,
   CheckCircle2,
+  ClipboardList,
   CloudOff,
+  CircleStop,
+  FileCheck2,
   FileLock2,
   FileText,
+  HeartHandshake,
+  History,
   LayoutPanelLeft,
   Loader2,
   LockKeyhole,
   PanelRight,
+  Pill,
   RefreshCw,
+  Route,
   Save,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Target,
+  TrendingUp,
+  Users,
   X,
+  type LucideIcon,
 } from 'lucide-react'
 import type { Consultation } from '@/types'
 import type {
   ClinicalDocumentFormat,
   ClinicalDocumentKind,
   DynamicConsentType,
-  DynamicConversationTopic,
   DynamicFormVersionPreview,
   FormColorToken,
   DynamicGeneratedContent,
   DynamicGeneratedDocument,
   DynamicParticipant,
   DynamicQuarantineItem,
+  DynamicTranscriptVersionCreateResult,
 } from '@/types/forms'
 import { ApiError, api } from '@/services/api'
 import { dynamicConsultationApi } from '@/services/dynamic-consultation-api'
 import { useDynamicConsultation } from '@/hooks/useDynamicConsultation'
-import { TranscriptionMode, useRealtimeTranscription } from '@/hooks/useRealtimeTranscription'
+import {
+  useRealtimeTranscription,
+  type TranscriptCompletionContext,
+  type TranscriptionMode,
+} from '@/hooks/useRealtimeTranscription'
 import { useFeedback } from '@/components/ui/FeedbackProvider'
+import { useSession } from '@/components/providers/SessionProvider'
 import { Button } from '@/components/ui/Button'
 import { cn } from '@/components/shared/utils'
+import { usePersistentState } from '@/hooks/usePersistentState'
 import { RecordingBar } from '@/components/consultation/RecordingBar'
+import {
+  ConsultationStartDialog,
+  type ActiveConsultationStartConflict,
+} from './ConsultationStartDialog'
 import { DynamicTabRenderer } from './DynamicFieldRenderer'
-import { DynamicPreparationPanel, isDynamicRecordingReady } from './DynamicPreparationPanel'
+import {
+  DynamicPreparationPanel,
+  getDynamicRecordingBlockers,
+  isDynamicRecordingReady,
+} from './DynamicPreparationPanel'
 import { DynamicReviewPanel } from './DynamicReviewPanel'
 import { DynamicEvolutionPanel } from './DynamicEvolutionPanel'
-import { DynamicConversationPanel } from './DynamicConversationPanel'
+import { DynamicConversationHistoryModal } from './DynamicConversationHistoryModal'
+import {
+  dynamicQuarantineBlocksFinalization,
+  getDynamicAiVoiceReadiness,
+} from './dynamic-voice-readiness'
+import {
+  createRealtimeInterpretationQueue,
+  type RealtimeInterpretationQueue,
+} from './realtime-interpretation-queue'
 import {
   DynamicMedicationPanel,
   type DynamicMedicationReferenceRecord,
@@ -56,7 +92,7 @@ interface Props {
   consultation: Consultation
 }
 
-type AssistantSection = 'preparacao' | 'revisao' | 'medicamentos' | 'evolucao' | 'conversa'
+type AssistantSection = 'preparacao' | 'revisao' | 'medicamentos' | 'evolucao'
 type MobileView = 'formulario' | 'assistente'
 
 const ASSISTANT_SECTIONS: Array<{
@@ -64,11 +100,10 @@ const ASSISTANT_SECTIONS: Array<{
   label: string
   shortLabel: string
 }> = [
-  { id: 'preparacao', label: 'Consentimentos, participantes e vozes', shortLabel: 'Preparação' },
+  { id: 'preparacao', label: 'Consentimentos da consulta', shortLabel: 'Consentimentos' },
   { id: 'revisao', label: 'Central de revisão', shortLabel: 'Revisão' },
   { id: 'medicamentos', label: 'Referências de medicamentos', shortLabel: 'Medicamentos' },
   { id: 'evolucao', label: 'SOAP, DAP ou BIRP', shortLabel: 'Evolução' },
-  { id: 'conversa', label: 'Conversa e tópicos', shortLabel: 'Conversa' },
 ]
 
 const STATUS_INFO: Record<string, { label: string; className: string }> = {
@@ -91,6 +126,22 @@ const TAB_NAV_STYLES: Record<FormColorToken, { active: string; icon: string }> =
   rosa: { active: 'bg-rose-50 text-rose-900 ring-rose-100', icon: 'bg-rose-100 text-rose-700' },
 }
 
+const FORM_TAB_ICONS: Record<string, LucideIcon> = {
+  Activity,
+  BrainCircuit,
+  ClipboardList,
+  FileCheck2,
+  HeartHandshake,
+  LockKeyhole,
+  Pill,
+  Route,
+  ShieldAlert,
+  ShieldCheck,
+  Target,
+  TrendingUp,
+  Users,
+}
+
 function isWaitingStatus(status: string) {
   return status === 'em_espera' || status === 'scheduled'
 }
@@ -103,25 +154,38 @@ function isFinishedStatus(status: string) {
   return status === 'finalizado' || status === 'completed'
 }
 
-function isEmptyValue(value: unknown) {
-  return value == null || value === '' || (Array.isArray(value) && value.length === 0)
+function parseActiveConsultationStartConflict(
+  error: unknown
+): ActiveConsultationStartConflict | null {
+  if (!(error instanceof ApiError) || error.code !== 'ACTIVE_CONSULTATION_EXISTS') return null
+
+  const candidate = error.payload?.activeConsultation
+  if (!candidate || typeof candidate !== 'object') return null
+  const activeConsultation = candidate as Record<string, unknown>
+  if (
+    typeof activeConsultation.id !== 'string' ||
+    typeof activeConsultation.patientName !== 'string'
+  ) {
+    return null
+  }
+
+  return {
+    message: error.message,
+    activeConsultation: {
+      id: activeConsultation.id,
+      patientName: activeConsultation.patientName,
+      startedAt: typeof activeConsultation.startedAt === 'string'
+        ? activeConsultation.startedAt
+        : null,
+      scheduleTitle: typeof activeConsultation.scheduleTitle === 'string'
+        ? activeConsultation.scheduleTitle
+        : null,
+    },
+  }
 }
 
-export function areDynamicVoicesReady(
-  turns: Array<{ diarizationLabel?: string }>,
-  participants: DynamicParticipant[]
-) {
-  if (!turns.length) return false
-  const participantsByLabel = new Map(
-    participants
-      .filter((participant) => participant.active && participant.speakerLabel)
-      .map((participant) => [participant.speakerLabel!, participant])
-  )
-  return turns.every((turn) => {
-    if (!turn.diarizationLabel) return false
-    const participant = participantsByLabel.get(turn.diarizationLabel)
-    return Boolean(participant?.authorized)
-  })
+function isEmptyValue(value: unknown) {
+  return value == null || value === '' || (Array.isArray(value) && value.length === 0)
 }
 
 function DynamicVersionDialog({
@@ -246,25 +310,41 @@ export function DynamicConsultationView({ consultation }: Props) {
   const router = useRouter()
   const queryClient = useQueryClient()
   const { notify, confirm } = useFeedback()
+  const { user } = useSession()
   const dynamic = useDynamicConsultation(consultation.id)
   const [currentConsultation, setCurrentConsultation] = useState(consultation)
+  const [startDialogOpen, setStartDialogOpen] = useState(() => isWaitingStatus(consultation.status))
+  const [startConflict, setStartConflict] = useState<ActiveConsultationStartConflict | null>(null)
+  const [startError, setStartError] = useState<string | null>(null)
   const [documentKind, setDocumentKind] = useState<ClinicalDocumentKind>('compartilhavel')
   const [activeTabId, setActiveTabId] = useState('')
   const [assistantSection, setAssistantSection] = useState<AssistantSection>('preparacao')
   const [assistantOpen, setAssistantOpen] = useState(false)
+  const [conversationHistoryOpen, setConversationHistoryOpen] = useState(false)
   const [mobileView, setMobileView] = useState<MobileView>('formulario')
   const [working, setWorking] = useState<string | null>(null)
-  const [topics, setTopics] = useState<DynamicConversationTopic[]>([])
   const [lastError, setLastError] = useState<string | null>(null)
   const [adendumReason, setAdendumReason] = useState('')
   const [committedTranscript, setCommittedTranscript] = useState('')
+  const [isRealtimeInterpreting, setIsRealtimeInterpreting] = useState(false)
   const [versionPreview, setVersionPreview] = useState<DynamicFormVersionPreview | null>(null)
   const [versionBusy, setVersionBusy] = useState(false)
+  const [rememberStartTerms, setRememberStartTerms, startTermsPreferenceLoaded] = usePersistentState(
+    `pep-ui:consultation-start-reminder:v1:${user?.id || 'sem-usuario'}`,
+    false
+  )
   const transcriptQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const realtimeInterpretationQueueRef = useRef<RealtimeInterpretationQueue | null>(null)
+  const refreshRuntimeRef = useRef<() => Promise<typeof dynamic.runtime>>(async () => undefined)
+  const reportRealtimeInterpretationErrorRef = useRef<(error: unknown) => void>(() => undefined)
+  const realtimeInterpretationErrorReportedRef = useRef(false)
 
   const runtime = dynamic.runtime
 
-  useEffect(() => setCurrentConsultation(consultation), [consultation])
+  useEffect(() => {
+    setCurrentConsultation(consultation)
+    if (!isWaitingStatus(consultation.status)) setStartDialogOpen(false)
+  }, [consultation])
   useEffect(() => {
     if (runtime) setCommittedTranscript(runtime.conversation.transcript || '')
   }, [runtime])
@@ -277,49 +357,62 @@ export function DynamicConsultationView({ consultation }: Props) {
 
   const refreshRuntime = useCallback(async () => {
     const result = await dynamic.refetch()
-    return result.data?.formMode === 'dynamic' ? result.data : undefined
+    return result.data
   }, [dynamic])
 
-  const performDiarization = useCallback(async (announce = true) => {
-    setWorking('diarize')
-    try {
-      const result = await dynamicConsultationApi.diarize(consultation.id)
-      await refreshRuntime()
-      setAssistantSection('preparacao')
-      setAssistantOpen(true)
-      setMobileView('assistente')
-      setLastError(null)
-      if (announce) {
-        notify(
-          result.requiresConfirmation ? 'info' : 'success',
-          result.requiresConfirmation ? 'Confirme as vozes identificadas' : 'Vozes identificadas',
-          result.requiresConfirmation
-            ? `${result.unknownLabels.length} voz(es) ainda precisam ser associadas a participantes autorizados.`
-            : 'Todas as vozes estão associadas a participantes autorizados.'
-        )
-      }
-      return result
-    } catch (error) {
-      reportError('Não foi possível separar as vozes', error)
-      return undefined
-    } finally {
-      setWorking(null)
+  useEffect(() => {
+    refreshRuntimeRef.current = refreshRuntime
+    reportRealtimeInterpretationErrorRef.current = (error) => {
+      if (realtimeInterpretationErrorReportedRef.current) return
+      realtimeInterpretationErrorReportedRef.current = true
+      reportError('O preenchimento automático em tempo real foi interrompido', error)
     }
-  }, [consultation.id, notify, refreshRuntime, reportError])
+  }, [refreshRuntime, reportError])
+
+  useEffect(() => {
+    const queue = createRealtimeInterpretationQueue({
+      debounceMs: 400,
+      interpret: () => dynamicConsultationApi.reinterpret(consultation.id),
+      onApplied: async () => {
+        realtimeInterpretationErrorReportedRef.current = false
+        await refreshRuntimeRef.current()
+      },
+      onError: (error) => reportRealtimeInterpretationErrorRef.current(error),
+      onBusyChange: setIsRealtimeInterpreting,
+    })
+    realtimeInterpretationQueueRef.current = queue
+
+    return () => {
+      queue.dispose()
+      if (realtimeInterpretationQueueRef.current === queue) {
+        realtimeInterpretationQueueRef.current = null
+      }
+    }
+  }, [consultation.id])
 
   const handleTranscriptCompleted = useCallback(async (
     text: string,
     itemId: string,
-    payload?: Record<string, unknown>
+    context: TranscriptCompletionContext
   ) => {
     const persist = async () => {
+      if (context.alreadyPersisted) {
+        setCommittedTranscript((current) =>
+          context.fullTranscript?.trim() ||
+          [current, text].filter(Boolean).join('\n')
+        )
+        realtimeInterpretationQueueRef.current?.request()
+        return
+      }
+
       const result = await api.consultations.appendRealtimeTranscript(consultation.id, {
         itemId,
         text,
-        payload,
+        payload: context.payload,
       })
       if (result.appendedText) {
         setCommittedTranscript((current) => [current, result.appendedText].filter(Boolean).join('\n'))
+        realtimeInterpretationQueueRef.current?.request()
       }
     }
     transcriptQueueRef.current = transcriptQueueRef.current.then(persist, persist)
@@ -336,19 +429,19 @@ export function DynamicConsultationView({ consultation }: Props) {
   ) => {
     try {
       await api.consultations.saveAudio(consultation.id, fullBlob)
-      if (context.mode === 'local') {
-        const result = await api.consultations.transcribeChunk(consultation.id, fullBlob)
-        if (result.chunkTranscript) {
-          setCommittedTranscript((current) => [current, result.chunkTranscript].filter(Boolean).join('\n'))
-        }
-      }
+      await realtimeInterpretationQueueRef.current?.flush()
       await refreshRuntime()
-      notify('success', 'Áudio preservado', 'A segunda passagem vai separar as vozes para confirmação.')
-      await performDiarization()
+      notify(
+        'success',
+        'Áudio preservado',
+        context.mode === 'local'
+          ? 'A transcrição local foi consolidada e o PEP atualizado.'
+          : 'A transcrição foi consolidada e o PEP atualizado.'
+      )
     } catch (error) {
       reportError('Não foi possível preservar o áudio da consulta', error)
     }
-  }, [consultation.id, notify, performDiarization, refreshRuntime, reportError])
+  }, [consultation.id, notify, refreshRuntime, reportError])
 
   const {
     state: recordingState,
@@ -359,7 +452,7 @@ export function DynamicConsultationView({ consultation }: Props) {
     stopRecording,
   } = useRealtimeTranscription({
     consultationId: consultation.id,
-    commitIntervalMs: 8000,
+    commitIntervalMs: 5000,
     onTranscriptCompleted: handleTranscriptCompleted,
     onStop: handleAudioStopped,
   })
@@ -371,15 +464,38 @@ export function DynamicConsultationView({ consultation }: Props) {
   const isWaiting = isWaitingStatus(currentConsultation.status)
   const isInProgress = isInProgressStatus(currentConsultation.status)
   const isFinished = isFinishedStatus(currentConsultation.status)
+  const recordingBlockers = runtime ? getDynamicRecordingBlockers(runtime) : []
   const recordingReady = runtime ? isDynamicRecordingReady(runtime) : false
-  const voicesReady = runtime
-    ? areDynamicVoicesReady(runtime.conversation.turns, runtime.participants)
-    : false
+  const voiceReadiness = runtime
+    ? getDynamicAiVoiceReadiness(runtime.conversation.turns, runtime.participants)
+    : null
   const hasTranscript = Boolean(runtime?.conversation.transcript?.trim() || committedTranscript.trim())
-  const canGenerateWithAi = isInProgress && recordingState === 'idle' && recordingReady && voicesReady && hasTranscript
+  const canGenerateWithAi =
+    isInProgress && recordingState === 'idle' && recordingReady && hasTranscript
   const canCreateManual = isInProgress && recordingState === 'idle'
+  const canConfirmDocument = recordingState === 'idle' && working == null
+  const confirmationBlockedReason = recordingState !== 'idle'
+    ? 'Encerre a gravação e aguarde o processamento do áudio antes de confirmar.'
+    : working
+      ? 'Aguarde a operação clínica em andamento antes de confirmar.'
+      : undefined
+  const aiBlockedReason = recordingState === 'recording'
+    ? 'Encerre a gravação para gerar a evolução. O PEP continua sendo preenchido durante a conversa.'
+    : recordingState === 'processing'
+      ? 'O áudio e o preenchimento do PEP ainda estão sendo consolidados.'
+      : !recordingReady
+        ? 'Há consentimentos pendentes para transcrição e assistência por IA.'
+        : !hasTranscript
+          ? 'Ainda não há falas transcritas para gerar a evolução.'
+          : undefined
   const displayTranscript = [committedTranscript, liveTranscript].filter(Boolean).join('\n')
   const status = STATUS_INFO[currentConsultation.status] || STATUS_INFO.em_espera
+
+  const openAssistantSection = (section: AssistantSection) => {
+    setAssistantSection(section)
+    setAssistantOpen(true)
+    setMobileView('assistente')
+  }
 
   const activeDocument = runtime?.definition.documents.find((document) => document.kind === documentKind)
   const activeTab = activeDocument?.tabs.find((tab) => tab.id === activeTabId) || activeDocument?.tabs[0]
@@ -394,17 +510,39 @@ export function DynamicConsultationView({ consultation }: Props) {
 
   const assistantBusy = working != null || recordingState !== 'idle'
 
-  const handleStartConsultation = async () => {
+  const handleStartConsultation = async (rememberTerms: boolean) => {
     if (working) return
+    setStartConflict(null)
+    setStartError(null)
     setWorking('start')
     try {
       const updated = await api.consultations.start(consultation.id)
       setCurrentConsultation(updated)
       queryClient.setQueryData(['consultations', consultation.id], updated)
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['schedule-dashboard'] }),
+        queryClient.invalidateQueries({ queryKey: ['schedule-calendar'] }),
+        queryClient.invalidateQueries({ queryKey: ['agenda-calendar'] }),
+        queryClient.invalidateQueries({ queryKey: ['agenda-slots'] }),
+        queryClient.invalidateQueries({ queryKey: ['patients'] }),
+      ])
+      setRememberStartTerms(rememberTerms)
+      setStartDialogOpen(false)
+      setStartConflict(null)
+      setStartError(null)
       notify('success', 'Consulta iniciada', 'O preenchimento manual está liberado. A gravação depende dos consentimentos.')
+      if (!recordingReady) openAssistantSection('preparacao')
       setLastError(null)
     } catch (error) {
-      reportError('Não foi possível iniciar a consulta', error)
+      const conflict = parseActiveConsultationStartConflict(error)
+      if (conflict) {
+        setStartConflict(conflict)
+        setStartError(null)
+        setLastError(conflict.message)
+      } else {
+        setStartError(error instanceof Error ? error.message : 'Não foi possível iniciar a consulta')
+        reportError('Não foi possível iniciar a consulta', error)
+      }
     } finally {
       setWorking(null)
     }
@@ -416,21 +554,66 @@ export function DynamicConsultationView({ consultation }: Props) {
       return
     }
     if (!recordingReady) {
-      setAssistantSection('preparacao')
-      setAssistantOpen(true)
-      setMobileView('assistente')
+      openAssistantSection('preparacao')
       notify('error', 'Gravação bloqueada', 'Registre os consentimentos de áudio, IA e participantes ativos.')
       return
     }
     void startRecording()
-      .then(() => notify('success', 'Gravação iniciada', 'O áudio será preservado para auditoria e diarização.'))
+      .then(() => notify(
+        'success',
+        'Gravação iniciada',
+        'A conversa será transcrita e o PEP atualizado durante o atendimento.'
+      ))
       .catch((error) => reportError('Não foi possível iniciar a gravação', error))
   }
 
   const handleStopRecording = () => {
     void stopRecording()
-      .then(() => notify('info', 'Gravação encerrada', 'Confirme a identificação das vozes antes de usar a IA.'))
+      .then(() => notify(
+        'info',
+        'Gravação encerrada',
+        'A transcrição e o preenchimento do PEP foram consolidados.'
+      ))
       .catch((error) => reportError('Não foi possível encerrar a gravação', error))
+  }
+
+  const handleOpenFinalization = async () => {
+    if (working) {
+      notify('info', 'Aguarde a operação atual', 'Depois você poderá preparar a evolução para finalizar o atendimento.')
+      return
+    }
+    if (recordingState === 'processing') {
+      notify('info', 'Áudio em processamento', 'Aguarde a preservação do áudio antes de finalizar.')
+      return
+    }
+    if (recordingState === 'recording') {
+      const accepted = await confirm({
+        title: 'Parar a gravação para finalizar?',
+        description: 'O áudio será preservado e processado antes de abrir a evolução clínica.',
+        confirmLabel: 'Parar e continuar',
+      })
+      if (!accepted) return
+      try {
+        await stopRecording()
+      } catch (error) {
+        reportError('Não foi possível encerrar a gravação', error)
+        return
+      }
+    }
+
+    try {
+      await transcriptQueueRef.current
+      await realtimeInterpretationQueueRef.current?.flush()
+      await dynamic.flushPending()
+      openAssistantSection('evolucao')
+      notify(
+        'info',
+        'Finalizar atendimento',
+        'Crie ou revise a evolução compartilhável e confirme para encerrar a consulta.'
+      )
+    } catch (error) {
+      reportError('Não foi possível preparar a finalização', error)
+    }
   }
 
   const handleConsent = async (
@@ -470,7 +653,7 @@ export function DynamicConsultationView({ consultation }: Props) {
 
   const handleUpdateParticipant = async (
     participantId: string,
-    data: Partial<Pick<DynamicParticipant, 'speakerLabel' | 'active'>>
+    data: Pick<DynamicParticipant, 'active'>
   ) => {
     setWorking(`participant:${participantId}`)
     try {
@@ -485,15 +668,11 @@ export function DynamicConsultationView({ consultation }: Props) {
   }
 
   const handleInterpret = async () => {
-    if (!voicesReady) {
-      setAssistantSection('preparacao')
-      notify('error', 'Confirme todas as vozes', 'Falas desconhecidas ou não autorizadas não podem alimentar o prontuário.')
-      return
-    }
     setWorking('interpret')
     try {
+      await realtimeInterpretationQueueRef.current?.flush()
       await dynamic.flushPending()
-      const result = await dynamicConsultationApi.reinterpret(consultation.id, true)
+      const result = await dynamicConsultationApi.reinterpret(consultation.id)
       await refreshRuntime()
       setAssistantSection('revisao')
       setAssistantOpen(true)
@@ -549,16 +728,27 @@ export function DynamicConsultationView({ consultation }: Props) {
     notify('success', 'Valor confirmado', 'O valor agora tem proveniência manual e revisão profissional.')
   }
 
-  const handleLoadTopics = async () => {
-    setWorking('topics')
+  const handleTranscriptVersionCreated = async (
+    result: DynamicTranscriptVersionCreateResult
+  ) => {
+    dynamic.setRuntime(result.runtime)
+    setCommittedTranscript(result.runtime.conversation.transcript || '')
+    setLastError(null)
+
     try {
-      const result = await dynamicConsultationApi.topics(consultation.id)
-      setTopics(result.topics)
-      notify('success', 'Tópicos atualizados', `${result.topics.length} assunto(s) com evidência validada.`)
+      await dynamicConsultationApi.reinterpret(consultation.id)
+      await refreshRuntime()
+      notify(
+        'success',
+        'Correção preservada',
+        `A versão ${result.savedVersion} foi registrada e o PEP foi recalculado.`
+      )
     } catch (error) {
-      reportError('Não foi possível organizar os tópicos', error)
-    } finally {
-      setWorking(null)
+      await refreshRuntime().catch(() => undefined)
+      reportError(
+        'A correção foi salva, mas o PEP não pôde ser recalculado agora',
+        error
+      )
     }
   }
 
@@ -568,6 +758,8 @@ export function DynamicConsultationView({ consultation }: Props) {
   ) => {
     setWorking('document:generate')
     try {
+      await transcriptQueueRef.current
+      await realtimeInterpretationQueueRef.current?.flush()
       await dynamic.flushPending()
       await dynamicConsultationApi.generateDocument(consultation.id, {
         format,
@@ -576,10 +768,20 @@ export function DynamicConsultationView({ consultation }: Props) {
       await refreshRuntime()
       notify('success', `${format} gerado`, 'Revise e edite todas as seções antes de confirmar.')
     } catch (error) {
-      if (error instanceof ApiError && error.code === 'SPEAKER_CONFIRMATION_REQUIRED') {
-        setAssistantSection('preparacao')
+      if (
+        error instanceof ApiError &&
+        ['AUTHORIZED_SPEECH_REQUIRED', 'SPEAKER_CONFIRMATION_REQUIRED'].includes(error.code || '')
+      ) {
+        setAssistantSection('evolucao')
+        setLastError('Ainda não há falas elegíveis suficientes para gerar a evolução.')
+        notify(
+          'info',
+          'Não há falas elegíveis para a evolução',
+          'Vozes ambíguas clinicamente relevantes podem entrar como fonte não identificada e exigem revisão. Falas sem relação com o atendimento ou com recusa não são usadas.'
+        )
+      } else {
+        reportError(`Não foi possível gerar ${format}`, error)
       }
-      reportError(`Não foi possível gerar ${format}`, error)
     } finally {
       setWorking(null)
     }
@@ -608,6 +810,16 @@ export function DynamicConsultationView({ consultation }: Props) {
     content: DynamicGeneratedContent,
     reason?: string
   ) => {
+    if (recordingState !== 'idle' || working) {
+      notify(
+        'info',
+        'Finalização temporariamente bloqueada',
+        recordingState !== 'idle'
+          ? 'Encerre a gravação e aguarde o áudio ser preservado antes de confirmar.'
+          : 'Aguarde a operação clínica em andamento.'
+      )
+      return
+    }
     const isAmendment = document.status === 'confirmado'
     const accepted = await confirm({
       title: isAmendment ? 'Registrar adendo imutável?' : 'Confirmar revisão profissional?',
@@ -630,6 +842,13 @@ export function DynamicConsultationView({ consultation }: Props) {
       const updated = await api.consultations.get(consultation.id)
       setCurrentConsultation(updated)
       queryClient.setQueryData(['consultations', consultation.id], updated)
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['schedule-dashboard'] }),
+        queryClient.invalidateQueries({ queryKey: ['schedule-calendar'] }),
+        queryClient.invalidateQueries({ queryKey: ['agenda-calendar'] }),
+        queryClient.invalidateQueries({ queryKey: ['agenda-slots'] }),
+        queryClient.invalidateQueries({ queryKey: ['patients'] }),
+      ])
       notify(
         'success',
         isAmendment
@@ -761,7 +980,9 @@ export function DynamicConsultationView({ consultation }: Props) {
   }
 
   const fieldEditingDisabled = isFinished && adendumReason.trim().length < 5
-  const pendingReviewCount = runtime.quarantine.filter((item) => item.status === 'pendente').length
+  const pendingReviewCount = runtime.quarantine.filter(
+    (item) => item.status === 'pendente' && dynamicQuarantineBlocksFinalization(item)
+  ).length
 
   const renderAssistant = () => (
     <div className="flex h-full min-h-0 flex-col bg-slate-50">
@@ -797,11 +1018,9 @@ export function DynamicConsultationView({ consultation }: Props) {
           <DynamicPreparationPanel
             runtime={runtime}
             busy={assistantBusy}
-            isDiarizing={working === 'diarize'}
             onConsent={(type, granted, participantId) => void handleConsent(type, granted, participantId)}
             onAddParticipant={(data) => void handleAddParticipant(data)}
             onUpdateParticipant={(participantId, data) => void handleUpdateParticipant(participantId, data)}
-            onDiarize={() => void performDiarization()}
           />
         ) : assistantSection === 'revisao' ? (
           <DynamicReviewPanel
@@ -825,22 +1044,19 @@ export function DynamicConsultationView({ consultation }: Props) {
             onAccept={(reference) => handleMedicationReview(reference, 'accept')}
             onDismiss={(reference) => handleMedicationReview(reference, 'dismiss')}
           />
-        ) : assistantSection === 'evolucao' ? (
+        ) : (
           <DynamicEvolutionPanel
             runtime={runtime}
             busy={working?.startsWith('document:')}
             canGenerate={canGenerateWithAi}
+            aiBlockedReason={aiBlockedReason}
+            excludedVoiceCount={voiceReadiness?.unknownVoiceCount || 0}
             canCreateManual={canCreateManual}
+            canConfirm={canConfirmDocument}
+            confirmationBlockedReason={confirmationBlockedReason}
             onGenerate={(format, kind) => void handleGenerateDocument(format, kind)}
             onCreateManual={(content) => void handleCreateManualDocument(content)}
             onConfirm={(document, content) => void handleConfirmDocument(document, content)}
-          />
-        ) : (
-          <DynamicConversationPanel
-            runtime={runtime}
-            topics={topics}
-            loadingTopics={working === 'topics'}
-            onLoadTopics={() => void handleLoadTopics()}
           />
         )}
       </div>
@@ -848,13 +1064,45 @@ export function DynamicConsultationView({ consultation }: Props) {
   )
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-slate-50">
+    <div className="flex h-dvh flex-col overflow-hidden bg-[#f6f8fb]">
+      {isWaiting && startDialogOpen && startTermsPreferenceLoaded ? (
+        <ConsultationStartDialog
+          patientName={currentConsultation.patient?.name || 'Paciente'}
+          scheduledAt={currentConsultation.scheduledAt}
+          templateName={runtime.template.name}
+          remembered={rememberStartTerms}
+          busy={working === 'start'}
+          conflict={startConflict}
+          errorMessage={startError}
+          onClose={() => setStartDialogOpen(false)}
+          onStart={handleStartConsultation}
+          onOpenActiveConsultation={(consultationId) => {
+            setStartDialogOpen(false)
+            router.push(`/consultations/${encodeURIComponent(consultationId)}`)
+          }}
+        />
+      ) : null}
+
       {versionPreview ? (
         <DynamicVersionDialog
           preview={versionPreview}
           busy={versionBusy}
           onClose={() => setVersionPreview(null)}
           onConfirm={(suppressWarning) => void applyLatestVersion(versionPreview.next.id, suppressWarning)}
+        />
+      ) : null}
+
+      {conversationHistoryOpen ? (
+        <DynamicConversationHistoryModal
+          runtime={runtime}
+          consultationStatus={currentConsultation.status}
+          onClose={() => setConversationHistoryOpen(false)}
+          onBeforeVersionCreate={async () => {
+            await transcriptQueueRef.current
+            await realtimeInterpretationQueueRef.current?.flush()
+            await dynamic.flushPending()
+          }}
+          onVersionCreated={handleTranscriptVersionCreated}
         />
       ) : null}
 
@@ -881,7 +1129,7 @@ export function DynamicConsultationView({ consultation }: Props) {
             <ArrowLeft className="h-5 w-5" />
           </Link>
 
-          <div className="hidden h-10 w-10 items-center justify-center rounded-xl bg-violet-50 font-bold text-violet-700 ring-1 ring-violet-100 sm:flex">
+          <div className="hidden h-10 w-10 items-center justify-center rounded-xl bg-blue-50 font-bold text-blue-700 ring-1 ring-blue-100 sm:flex">
             {currentConsultation.patient?.name?.charAt(0).toUpperCase() || 'P'}
           </div>
 
@@ -893,8 +1141,8 @@ export function DynamicConsultationView({ consultation }: Props) {
               <span className={cn('rounded-full border px-2 py-1 text-[11px] font-semibold', status.className)}>
                 {status.label}
               </span>
-              <span className="hidden rounded-full border border-violet-200 bg-violet-50 px-2 py-1 text-[11px] font-semibold text-violet-700 sm:inline-flex">
-                Psicologia dinâmica
+              <span className="hidden rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-600 sm:inline-flex">
+                Formulário clínico
               </span>
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">
@@ -920,6 +1168,14 @@ export function DynamicConsultationView({ consultation }: Props) {
             <Button size="icon" onClick={() => void dynamic.flushPending()} title="Salvar alterações agora" aria-label="Salvar alterações agora">
               <Save className="h-4 w-4" />
             </Button>
+            <Button
+              size="sm"
+              onClick={() => setConversationHistoryOpen(true)}
+              aria-label="Abrir histórico da conversa"
+            >
+              <History className="h-4 w-4" aria-hidden="true" />
+              Histórico
+            </Button>
             <Button size="icon" onClick={() => void handleExport('compartilhavel')} title="Exportar prontuário compartilhável" aria-label="Exportar prontuário compartilhável">
               <FileText className="h-4 w-4" />
             </Button>
@@ -929,16 +1185,39 @@ export function DynamicConsultationView({ consultation }: Props) {
             <Button
               size="icon"
               className={cn(assistantOpen && 'border-primary-200 bg-primary-50 text-primary-700')}
-              onClick={() => setAssistantOpen((current) => !current)}
+              onClick={() => {
+                setAssistantOpen((current) => !current)
+                setMobileView('assistente')
+              }}
               aria-label="Alternar assistente clínico"
               aria-pressed={assistantOpen}
             >
               <PanelRight className="h-4 w-4" />
             </Button>
             {isWaiting ? (
-              <Button variant="primary" onClick={() => void handleStartConsultation()} disabled={working === 'start'}>
-                {working === 'start' ? <Loader2 className="h-4 w-4 animate-spin" /> : <LayoutPanelLeft className="h-4 w-4" />}
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setStartConflict(null)
+                  setStartDialogOpen(true)
+                }}
+                aria-label="Iniciar consulta"
+              >
+                <LayoutPanelLeft className="h-4 w-4" />
                 <span className="hidden sm:inline">Iniciar consulta</span>
+              </Button>
+            ) : isInProgress ? (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => void handleOpenFinalization()}
+                disabled={working != null || recordingState === 'processing'}
+                title={recordingState === 'processing' ? 'Aguarde o processamento do áudio' : 'Preparar evolução e finalizar atendimento'}
+                aria-label="Finalizar atendimento"
+              >
+                <CircleStop className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Finalizar atendimento</span>
+                <span className="sm:hidden">Finalizar</span>
               </Button>
             ) : isFinished ? (
               <span className="inline-flex min-h-9 items-center gap-1.5 rounded-md bg-emerald-50 px-3 text-xs font-semibold text-emerald-700">
@@ -964,8 +1243,11 @@ export function DynamicConsultationView({ consultation }: Props) {
       ) : null}
 
       {isWaiting ? (
-        <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
-          A consulta pode ser preparada agora. Inicie o atendimento para gravar, gerar evolução ou finalizar.
+        <div className="shrink-0 border-b border-amber-200/80 bg-amber-50/80 px-4 py-2.5 text-xs text-amber-900">
+          <div className="mx-auto flex max-w-[1440px] items-center gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+            A consulta pode ser preparada agora. Inicie o atendimento para gravar, gerar evolução ou finalizar.
+          </div>
         </div>
       ) : null}
 
@@ -1019,37 +1301,42 @@ export function DynamicConsultationView({ consultation }: Props) {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="hidden w-64 shrink-0 overflow-y-scroll overscroll-contain border-r border-slate-200 bg-white [scrollbar-gutter:stable] md:block">
-          <div className="sticky top-0 z-10 border-b border-slate-100 bg-white px-4 py-3.5">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">Seções do documento</p>
+        <aside className="hidden w-[15.5rem] shrink-0 overflow-y-scroll overscroll-contain border-r border-slate-200/80 bg-white/80 [scrollbar-gutter:stable] md:block">
+          <div className="sticky top-0 z-10 border-b border-slate-100 bg-white/95 px-4 py-4 backdrop-blur">
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Navegação do prontuário</p>
           </div>
-          <nav className="space-y-1.5 p-3" aria-label="Abas do prontuário">
+          <nav className="space-y-1 p-3" aria-label="Abas do prontuário">
             {activeDocument?.tabs.map((tab) => {
               const requiredMissing = tab.elements.filter(
                 (field) => field.required && isEmptyValue(dynamic.values[documentKind][field.id])
               ).length
               const tabTheme = TAB_NAV_STYLES[tab.color]
+              const TabIcon = FORM_TAB_ICONS[tab.icon] || LayoutPanelLeft
               return (
                 <button
                   key={tab.id}
                   type="button"
                   onClick={() => setActiveTabId(tab.id)}
                   className={cn(
-                    'flex w-full items-center gap-2.5 rounded-xl px-3 py-3 text-left text-sm font-medium transition-colors',
+                    'group flex w-full items-center gap-2.5 rounded-xl px-3 py-3 text-left text-sm font-medium transition-all',
                     activeTab?.id === tab.id
-                      ? cn('ring-1', tabTheme.active)
-                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                      ? cn('shadow-sm ring-1', tabTheme.active)
+                      : 'text-slate-600 hover:bg-white hover:text-slate-950 hover:shadow-sm'
                   )}
                   aria-current={activeTab?.id === tab.id ? 'page' : undefined}
                 >
                   <span className={cn(
-                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[10px] font-bold shadow-sm',
-                    activeTab?.id === tab.id ? tabTheme.icon : 'bg-white text-slate-500'
+                    'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset transition-colors',
+                    activeTab?.id === tab.id ? tabTheme.icon : 'bg-white text-slate-400 ring-slate-200 group-hover:text-slate-600'
                   )}>
-                    {tab.label.charAt(0).toUpperCase()}
+                    <TabIcon className="h-4 w-4" aria-hidden="true" />
                   </span>
                   <span className="min-w-0 flex-1 truncate">{tab.label}</span>
-                  {requiredMissing ? <span className="text-[9px] font-semibold text-amber-700">{requiredMissing}</span> : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+                  {requiredMissing ? (
+                    <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-100 px-1.5 text-[9px] font-bold text-amber-700">{requiredMissing}</span>
+                  ) : (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                  )}
                 </button>
               )
             })}
@@ -1057,18 +1344,18 @@ export function DynamicConsultationView({ consultation }: Props) {
         </aside>
 
         <main className={cn(
-          'min-h-0 min-w-0 flex-1 touch-pan-y overflow-y-scroll overscroll-contain bg-slate-50 [scrollbar-gutter:stable]',
+          'min-h-0 min-w-0 flex-1 touch-pan-y overflow-y-scroll overscroll-contain bg-[radial-gradient(circle_at_top_left,_rgba(219,234,254,0.38),_transparent_34%),linear-gradient(to_bottom,_#f8fafc,_#f4f7fb)] [scrollbar-gutter:stable]',
           mobileView === 'formulario' ? 'block' : 'hidden md:block'
         )}>
-          <div className="sticky top-0 z-10 border-b border-slate-200 bg-white/95 px-3 py-3 backdrop-blur lg:px-6">
-            <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2">
-              <div className="grid grid-cols-2 rounded-lg border border-slate-200 bg-slate-100 p-1" role="tablist" aria-label="Documento clínico">
+          <div className="sticky top-0 z-10 border-b border-slate-200/80 bg-white/90 px-3 py-3 backdrop-blur-xl lg:px-6">
+            <div className="mx-auto flex max-w-[1440px] flex-wrap items-center gap-2">
+              <div className="grid grid-cols-2 rounded-xl border border-slate-200 bg-slate-100/80 p-1" role="tablist" aria-label="Documento clínico">
                 <button
                   type="button"
                   role="tab"
                   aria-selected={documentKind === 'compartilhavel'}
                   onClick={() => setDocumentKind('compartilhavel')}
-                  className={cn('rounded-md px-3 py-2 text-xs font-semibold', documentKind === 'compartilhavel' ? 'bg-white text-primary-700 shadow-sm' : 'text-slate-500')}
+                  className={cn('rounded-lg px-3 py-2 text-xs font-semibold transition-all', documentKind === 'compartilhavel' ? 'bg-white text-primary-700 shadow-sm ring-1 ring-slate-200/70' : 'text-slate-500 hover:text-slate-700')}
                 >
                   <FileText className="mr-1 inline h-3.5 w-3.5" /> Prontuário
                 </button>
@@ -1077,34 +1364,18 @@ export function DynamicConsultationView({ consultation }: Props) {
                   role="tab"
                   aria-selected={documentKind === 'restrito'}
                   onClick={() => setDocumentKind('restrito')}
-                  className={cn('rounded-md px-3 py-2 text-xs font-semibold', documentKind === 'restrito' ? 'bg-white text-violet-700 shadow-sm' : 'text-slate-500')}
+                  className={cn('rounded-lg px-3 py-2 text-xs font-semibold transition-all', documentKind === 'restrito' ? 'bg-white text-violet-700 shadow-sm ring-1 ring-slate-200/70' : 'text-slate-500 hover:text-slate-700')}
                 >
                   <LockKeyhole className="mr-1 inline h-3.5 w-3.5" /> Registro restrito
                 </button>
               </div>
 
               <div className="ml-auto flex items-center gap-2">
-                {hasTranscript && voicesReady ? (
-                  <span className="hidden items-center gap-1 text-[11px] font-semibold text-emerald-700 lg:inline-flex">
-                    <ShieldCheck className="h-3.5 w-3.5" /> Vozes confirmadas
-                  </span>
-                ) : hasTranscript ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAssistantSection('preparacao')
-                      setAssistantOpen(true)
-                    }}
-                    className="hidden items-center gap-1 text-[11px] font-semibold text-amber-700 lg:inline-flex"
-                  >
-                    <AlertTriangle className="h-3.5 w-3.5" /> Confirmar vozes
-                  </button>
-                ) : null}
                 <Button
                   size="sm"
                   onClick={() => void handleInterpret()}
                   disabled={!canGenerateWithAi || working === 'interpret'}
-                  title={!voicesReady ? 'Confirme as vozes antes de usar a IA' : 'Reinterpretar o formulário com evidências validadas'}
+                  title={aiBlockedReason || 'Consolidar o preenchimento atual do PEP'}
                 >
                   {working === 'interpret' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                   Atualizar com IA
@@ -1112,7 +1383,7 @@ export function DynamicConsultationView({ consultation }: Props) {
               </div>
             </div>
 
-            <div className="mx-auto mt-2 flex max-w-7xl gap-1 overflow-x-auto pb-1 md:hidden" role="tablist" aria-label="Abas do documento">
+            <div className="mx-auto mt-2 flex max-w-[1440px] gap-1 overflow-x-auto pb-1 md:hidden" role="tablist" aria-label="Abas do documento">
               {activeDocument?.tabs.map((tab) => (
                 <button
                   key={tab.id}
@@ -1131,13 +1402,13 @@ export function DynamicConsultationView({ consultation }: Props) {
             </div>
           </div>
 
-          <div className="mx-auto w-full max-w-[1440px] px-3 pb-24 pt-5 lg:px-6 lg:pt-6">
+          <div className="mx-auto w-full max-w-[1360px] px-3 pb-24 pt-5 lg:px-7 lg:pt-7">
             {documentKind === 'restrito' ? (
               <div className="mb-3 flex items-start gap-2 rounded-lg border border-violet-200 bg-violet-50 p-3">
                 <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0 text-violet-700" />
                 <div>
-                  <p className="text-xs font-semibold text-violet-900">Registro psicológico restrito</p>
-                  <p className="mt-0.5 text-[11px] text-violet-700">Não é incluído no prontuário compartilhável nem em sua exportação.</p>
+                  <p className="text-xs font-semibold text-violet-900">Registro clínico restrito</p>
+                  <p className="mt-0.5 text-[11px] text-violet-700">Conteúdo privativo do profissional, separado do prontuário compartilhável e de sua exportação.</p>
                 </div>
               </div>
             ) : null}
@@ -1193,9 +1464,12 @@ export function DynamicConsultationView({ consultation }: Props) {
           transcriptionMode={transcriptionMode}
           connectionError={connectionError}
           transcript={displayTranscript}
-          isInterpreting={working === 'interpret'}
+          isInterpreting={working === 'interpret' || isRealtimeInterpreting}
           disabled={!recordingReady}
-          disabledReason="Registre consentimentos de áudio, IA e participantes antes de gravar"
+          disabledReason={recordingBlockers.length
+            ? `Pendências para gravar: ${recordingBlockers.join(', ')}.`
+            : 'Registre os consentimentos antes de gravar.'}
+          onPrepare={() => openAssistantSection('preparacao')}
           onStart={handleStartRecording}
           onStop={handleStopRecording}
         />

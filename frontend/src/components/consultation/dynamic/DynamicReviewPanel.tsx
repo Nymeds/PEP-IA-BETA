@@ -6,10 +6,13 @@ import type {
   ClinicalDocumentKind,
   ClinicalFormElement,
   DynamicConsultationRuntime,
+  DynamicEvidence,
   DynamicQuarantineItem,
+  DynamicReviewPayload,
 } from '@/types/forms'
 import { Button } from '@/components/ui/Button'
 import { cn } from '@/components/shared/utils'
+import { safeSpeakerDisplayName } from './dynamic-voice-readiness'
 
 interface FieldOption {
   field: ClinicalFormElement
@@ -17,19 +20,140 @@ interface FieldOption {
   label: string
 }
 
-function parsePayload(item: DynamicQuarantineItem) {
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : undefined
+}
+
+function parseEvidence(value: unknown): DynamicEvidence[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((candidate, index) => {
+    const evidence = recordValue(candidate)
+    const quote = stringValue(evidence?.quote)?.trim()
+    if (!evidence || !quote) return []
+    return [{
+      segmentId: stringValue(evidence.segmentId) || `evidencia-${index}`,
+      sequence: typeof evidence.sequence === 'number' ? evidence.sequence : index + 1,
+      quote,
+      speakerLabel: null,
+      speakerDisplayName: stringValue(evidence.speakerDisplayName) || null,
+      participantId: stringValue(evidence.participantId) || null,
+      startMs: typeof evidence.startMs === 'number' ? evidence.startMs : null,
+      endMs: typeof evidence.endMs === 'number' ? evidence.endMs : null,
+    }]
+  })
+}
+
+function parsePayload(item: DynamicQuarantineItem): DynamicReviewPayload {
+  let parsed: unknown = item.payload
   try {
-    return JSON.parse(item.payloadJson || '{}') as {
-      fieldId?: string
-      documentKind?: ClinicalDocumentKind
-      value?: unknown
-      valueJson?: string
-      uncertainty?: string | null
-      confidence?: string
-    }
+    if (!parsed) parsed = JSON.parse(item.payloadJson || '{}')
   } catch {
     return {}
   }
+
+  const outer = recordValue(parsed)
+  if (!outer) return {}
+  const nested = recordValue(outer.payload)
+  const source = nested ? { ...outer, ...nested } : outer
+  const documentKind = source.documentKind === 'compartilhavel' ||
+    source.documentKind === 'restrito'
+    ? source.documentKind
+    : undefined
+
+  return {
+    fieldId: stringValue(source.fieldId),
+    documentKind,
+    ...(Object.prototype.hasOwnProperty.call(source, 'value')
+      ? { value: source.value }
+      : {}),
+    valueJson: stringValue(source.valueJson),
+    uncertainty: stringValue(source.uncertainty) || null,
+    confidence: stringValue(source.confidence),
+    relevanceReason: stringValue(source.relevanceReason) || null,
+    summary: stringValue(source.summary) || null,
+    evidence: parseEvidence(source.evidence),
+    reviewStatus: stringValue(source.reviewStatus),
+    aiMode: stringValue(source.aiMode) as DynamicReviewPayload['aiMode'],
+    operation: stringValue(source.operation) as DynamicReviewPayload['operation'],
+    kind: stringValue(source.kind),
+    severity: stringValue(source.severity),
+  }
+}
+
+function formatEvidenceTime(milliseconds?: number | null) {
+  if (milliseconds == null) return ''
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function evidenceSource(evidence: DynamicEvidence) {
+  return safeSpeakerDisplayName(
+    evidence.speakerDisplayName,
+    evidence.participantId ? 'identificada' : 'nao_identificada'
+  )
+}
+
+function ReviewEvidence({
+  evidence,
+  relevanceReason,
+  summary,
+}: {
+  evidence: DynamicEvidence[]
+  relevanceReason?: string | null
+  summary?: string | null
+}) {
+  if (!evidence.length && !relevanceReason && !summary) return null
+  const sources = Array.from(new Set(evidence.map(evidenceSource)))
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-slate-200 bg-slate-50/80 p-2.5">
+      {summary ? (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+            Resumo para revisão
+          </p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-slate-700">{summary}</p>
+        </div>
+      ) : null}
+      {relevanceReason ? (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+            Por que é clinicamente relevante
+          </p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-slate-700">
+            {relevanceReason}
+          </p>
+        </div>
+      ) : null}
+      {sources.length ? (
+        <p className="text-[10px] font-semibold text-slate-600">
+          {sources.length === 1 ? 'Fonte da fala' : 'Fontes das falas'}:{' '}
+          <span className="text-slate-800">{sources.join(', ')}</span>
+        </p>
+      ) : null}
+      {evidence.map((item) => (
+        <blockquote
+          key={`${item.segmentId}-${item.sequence}`}
+          className="border-l-2 border-blue-300 pl-2 text-[11px] leading-relaxed text-slate-650"
+        >
+          <Quote className="mr-1 inline h-3 w-3 text-blue-600" aria-hidden="true" />
+          “{item.quote}”
+          <span className="mt-0.5 block text-[9px] not-italic text-slate-500">
+            {evidenceSource(item)} · trecho {item.sequence}
+            {formatEvidenceTime(item.startMs) ? ` · ${formatEvidenceTime(item.startMs)}` : ''}
+          </span>
+        </blockquote>
+      ))}
+    </div>
+  )
 }
 
 function toEditorValue(value: unknown) {

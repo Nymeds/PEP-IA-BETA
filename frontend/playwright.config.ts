@@ -22,7 +22,6 @@ export default defineConfig({
     reuseExistingServer: true,
     timeout: 120_000,
     env: {
-      NEXT_PUBLIC_DYNAMIC_FORMS_PSYCHOLOGY: 'true',
     },
   },
 })

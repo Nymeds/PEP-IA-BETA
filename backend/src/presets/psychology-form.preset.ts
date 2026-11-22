@@ -29,14 +29,21 @@ interface FieldSpec {
   height?: number
 }
 
-const EVIDENCIAS_SEGURAS = [
-  'Fala literalmente atribuida ao paciente ou a participante cadastrado e autorizado',
+const EVIDENCIAS_NUCLEARES = [
+  'Fala literalmente atribuida ao paciente identificado e autorizado, quando compativel com o campo',
   'Observacao explicitamente verbalizada pelo profissional durante a consulta',
+]
+
+const EVIDENCIAS_PARA_REVISAO = [
+  'Relato clinicamente relevante de acompanhante ou relacao contextual, sempre como sugestao com fonte atribuida e revisao obrigatoria',
+  'Fala clinicamente relevante de voz nao identificada, somente como sugestao atribuida a voz nao identificada e com revisao obrigatoria',
 ]
 
 const INFERENCIAS_PROIBIDAS = [
   'Nao diagnosticar, prescrever ou transformar hipotese em fato confirmado',
-  'Nao completar lacunas, inventar detalhes ou usar fala de participante nao autorizado',
+  'Nao completar lacunas nem inventar detalhes',
+  'Nao usar acompanhante, relacao contextual ou voz desconhecida para preenchimento automatico ou como se fossem o paciente',
+  'Nao usar fala irrelevante para a consulta nem fala de participante que recusou ou nao possui autorizacao vigente',
 ]
 
 function politicaIa(
@@ -48,11 +55,17 @@ function politicaIa(
   return {
     mode,
     description,
-    allowedEvidence: EVIDENCIAS_SEGURAS,
+    allowedEvidence: [...EVIDENCIAS_NUCLEARES, ...EVIDENCIAS_PARA_REVISAO],
     prohibitedInferences: INFERENCIAS_PROIBIDAS,
     expectedFormat,
-    examples: ['Registrar somente o conteudo que possui evidencia identificavel na conversa'],
-    counterexamples: ['Nao preencher com conhecimento geral ou com informacao ausente da consulta'],
+    examples: [
+      'Paciente ou profissional identificado pode sustentar a operacao compativel configurada para o campo',
+      'Acompanhante, relacao contextual ou voz nao identificada pode sustentar somente sugestao atribuida com revisao obrigatoria',
+    ],
+    counterexamples: [
+      'Nao preencher com conhecimento geral ou com informacao ausente da consulta',
+      'Nao converter relato de acompanhante ou voz desconhecida em fato confirmado do paciente',
+    ],
   }
 }
 
@@ -93,7 +106,7 @@ function construirCampos(specs: FieldSpec[]): ClinicalFieldDefinition[] {
       layout: {
         x: 24,
         y,
-        width: spec.width || 760,
+        width: spec.width || 1152,
         height,
         zIndex: 0,
         mobileOrder: index,

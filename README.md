@@ -1,8 +1,7 @@
 # PEP IA — prontuário eletrônico assistido por IA
 
-Beta experimental em português do Brasil. O sistema mantém o prontuário fixo
-original como motor `legacy` e habilita, sob feature flag, um motor dinâmico para
-Psicologia.
+Beta experimental em português do Brasil. Todo atendimento usa o motor de
+formulários clínicos dinâmicos, com definições versionadas por especialidade.
 
 > Não homologado para uso clínico real. Use somente dados fictícios ou um piloto
 > controlado até concluir revisão jurídica, RIPD, validação profissional e política
@@ -12,30 +11,29 @@ Psicologia.
 
 - autenticação e isolamento dos dados por profissional;
 - agenda mensal, semanal e linha do tempo diária;
-- prontuário legado preservado para consultas existentes e outras especialidades;
-- **Meu formulário** (`/formularios`) com rascunho, cópia, versão imutável,
-  publicação, formulário padrão, arquivamento e histórico;
-- editor visual com canvas livre no desktop, grade de 8 px, prevenção de
-  sobreposição, redimensionamento, desfazer/refazer, teclado e reflow mobile;
-- preset de Psicologia com prontuário compartilhável e registro psicológico
-  restrito, incluindo Familiares e rede e Medicamentos;
-- pinagem da versão ao agendar e troca auditada somente antes do início;
+- **Formulários** (`/formularios`) com rascunho, cópia, publicação imutável,
+  formulário padrão, arquivamento e histórico;
+- editor visual com canvas livre, prevenção de sobreposição, redimensionamento,
+  desfazer/refazer e reflow mobile;
+- presets iniciais de **Clínica Geral** e **Psicologia**, cada um com documento
+  compartilhável e registro restrito;
+- arquitetura preparada para cadastrar novas especialidades e novos formulários;
+- pinagem da versão publicada ao agendar e troca auditada somente antes do início;
 - campos e abas renderizados pelo schema publicado, com autosave otimista;
-- consentimentos separados de áudio, transcrição/IA e participantes;
+- consentimentos de áudio, transcrição/IA e participantes;
 - evidência literal por campo, identificação de vozes, quarentena e revisão humana;
-- evolução em SOAP, DAP ou BIRP, inclusive fluxo totalmente manual;
+- evolução em SOAP, DAP ou BIRP, inclusive fluxo manual;
 - exportações separadas e retenção por classe documental;
 - criptografia de áudio e conteúdo restrito em repouso em produção.
 
 A IA é sempre assistente. Conteúdo crítico, risco, hipóteses, condutas,
-diagnósticos, avaliações psicológicas e referências farmacológicas exigem revisão
-do profissional.
+diagnósticos, avaliações e referências farmacológicas exigem revisão profissional.
 
 ## Requisitos
 
 - Node.js 18 ou superior;
 - npm;
-- chave da OpenAI para os recursos de transcrição e IA.
+- chave da OpenAI para transcrição e IA.
 
 ## Instalação e execução
 
@@ -60,8 +58,6 @@ Copie `.env.EXAMPLE` para `.env` e revise, no mínimo:
 | Variável | Uso |
 |---|---|
 | `OPENAI_API_KEY` | Transcrição e assistência clínica |
-| `DYNAMIC_FORMS_PSYCHOLOGY` | Motor dinâmico de Psicologia no backend; use `false` como kill switch |
-| `NEXT_PUBLIC_DYNAMIC_FORMS_PSYCHOLOGY` | Experiência correspondente no frontend; use `false` para ocultar |
 | `DATA_ENCRYPTION_KEY` | Chave de 32 bytes para dados sensíveis; obrigatória em produção |
 | `DATABASE_URL` | SQLite; caminhos relativos são ancorados em `backend/prisma/` |
 | `NEXT_PUBLIC_API_URL` | URL pública do backend, padrão `http://localhost:3000` |
@@ -70,19 +66,21 @@ Consulte [`.env.EXAMPLE`](./.env.EXAMPLE) para modelos, retenção e demais opç
 
 ## Arquitetura
 
+> 📖 Documentação completa por camadas, função a função, no **[wiki de desenvolvedor](./docs/wiki/README.md)**.
+
 O repositório é um monorepo npm com:
 
 - `backend/`: Fastify 5, Prisma 6, SQLite e SDK OpenAI;
 - `frontend/`: Next.js 15, React 19, TanStack Query e Tailwind;
-- `backend/src/services/clinical-record-engine.service.ts`: seleção entre
-  `LegacyFixedEngine` e `DynamicFormEngine`;
-- `backend/src/presets/psychology-form.preset.ts`: definição inicial de Psicologia;
+- `backend/src/services/clinical-forms.service.ts`: contrato, validação e manifesto;
+- `backend/src/presets/psychology-form.preset.ts`: formulário base de Psicologia;
+- `backend/src/presets/general-clinic-form.preset.ts`: formulário base de Clínica Geral;
 - `frontend/src/components/forms/`: gerenciador e editor de formulários;
-- `frontend/src/components/consultation/dynamic/`: consulta dinâmica e revisão.
+- `frontend/src/components/consultation/dynamic/`: consulta, evidências e revisão.
 
 Cada versão publicada armazena uma definição canônica e um manifesto de runtime.
-Consultas dinâmicas ficam pinadas nessa versão; uma publicação futura não altera
-consultas já agendadas.
+Consultas ficam pinadas nessa versão; uma publicação futura não altera consultas
+já agendadas.
 
 ## Validação
 
@@ -95,12 +93,7 @@ npm run lint --workspace=frontend
 npm test --workspace=frontend
 npm run build --workspace=frontend
 npm run test:e2e --workspace=frontend
-npm run eval:psychology --workspace=backend
 ```
-
-`eval:psychology` valida o corpus sintético sem chamar a API. Para executar os
-casos contra os modelos configurados, acrescente `-- --execute` e forneça uma chave
-válida.
 
 ## Segurança operacional
 

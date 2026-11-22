@@ -407,7 +407,7 @@ async function expireConsultationDocument(
         userId,
         consultationId: document.consultationId,
         dataClass: kind === 'restrito'
-          ? 'registro_psicologico_restrito'
+          ? 'registro_clinico_restrito'
           : 'prontuario_compartilhavel',
         targetHash: hashTarget(document.id),
         reason: 'Prazo documental minimo e politica de retencao atingidos',

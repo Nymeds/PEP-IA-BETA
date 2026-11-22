@@ -1,7 +1,6 @@
 import { FastifyReply, FastifyRequest } from 'fastify'
 import { Prisma } from '@prisma/client'
 import { getPrisma } from '../lib/prisma'
-import { summarizePatient } from '../services/analysis.service'
 import { summarizeDynamicLongitudinalRecord } from '../services/dynamic-longitudinal-summary.service'
 import { parseFormDefinition } from '../services/clinical-forms.service'
 
@@ -380,63 +379,18 @@ export async function getPatientSummary(
   if (!patient) return reply.status(404).send({ error: 'Paciente nao encontrado' })
   const dynamicRecords = await buildDynamicLongitudinalRecords(patient.id, req.authUser!.id)
 
-  const relevant = patient.consultations.filter((consultation) => {
-    if (consultation.formMode === 'dynamic') return false
-    return (
-      consultation.transcript ||
-      consultation.chiefComplaint ||
-      consultation.assessment ||
-      consultation.plan
-    )
-  })
-
-  if (!relevant.length && !dynamicRecords.length) {
+  if (!dynamicRecords.length) {
     return reply.send({ summary: null, message: 'Sem atendimentos com conteudo para resumir' })
   }
 
-  if (dynamicRecords.length) {
-    const legacyRecords = relevant.map((consultation) => ({
-      date: new Date(consultation.scheduledAt || consultation.createdAt).toLocaleDateString('pt-BR'),
-      source: 'legacy' as const,
-      templateVersionId: null,
-      sharedFields: [
-        ['chiefComplaint', 'Queixa principal', consultation.chiefComplaint],
-        ['assessment', 'Avaliacao', consultation.assessment],
-        ['plan', 'Plano', consultation.plan],
-        ['currentMedications', 'Medicamentos relatados', consultation.currentMedications],
-        ['allergiesDetails', 'Alergias relatadas', consultation.allergiesDetails],
-      ].flatMap(([id, label, value]) => value ? [{
-        id: String(id),
-        label: String(label),
-        value,
-        source: 'legacy',
-        reviewStatus: 'legado',
-      }] : []),
-    }))
-    const summary = await summarizeDynamicLongitudinalRecord({
-      ownerId: req.authUser!.id,
-      records: [...legacyRecords, ...dynamicRecords],
-    })
-    return reply.send({
-      summary,
-      consultationCount: relevant.length + dynamicRecords.length,
-      formMode: 'dynamic',
-      sharedDocumentOnly: true,
-    })
-  }
-
-  const summary = await summarizePatient({
-    name: patient.name,
-    consultations: relevant.map((consultation) => ({
-      date: new Date(consultation.scheduledAt || consultation.createdAt).toLocaleDateString('pt-BR'),
-      chiefComplaint: consultation.chiefComplaint,
-      mainHypothesis: consultation.mainHypothesis,
-      assessment: consultation.assessment,
-      plan: consultation.plan,
-      currentMedications: consultation.currentMedications,
-      allergiesDetails: consultation.allergiesDetails,
-    })),
+  const summary = await summarizeDynamicLongitudinalRecord({
+    ownerId: req.authUser!.id,
+    records: dynamicRecords,
   })
-
-  return reply.send({ summary, consultationCount: relevant.length })
+  return reply.send({
+    summary,
+    consultationCount: dynamicRecords.length,
+    formMode: 'dynamic',
+    sharedDocumentOnly: true,
+  })
 }

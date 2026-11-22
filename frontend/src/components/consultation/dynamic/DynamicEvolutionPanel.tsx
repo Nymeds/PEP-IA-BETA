@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { CheckCircle2, FileCheck2, FilePenLine, FileText, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
+import { CheckCircle2, CircleStop, FileCheck2, FilePenLine, FileText, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
 import type {
   ClinicalDocumentFormat,
   ClinicalDocumentKind,
@@ -11,6 +11,7 @@ import type {
 } from '@/types/forms'
 import { Button } from '@/components/ui/Button'
 import { cn } from '@/components/shared/utils'
+import { dynamicQuarantineBlocksFinalization } from './dynamic-voice-readiness'
 
 const FORMAT_INFO: Record<ClinicalDocumentFormat, { title: string; description: string }> = {
   SOAP: {
@@ -77,7 +78,11 @@ export function DynamicEvolutionPanel({
   runtime,
   busy,
   canGenerate,
+  aiBlockedReason,
+  excludedVoiceCount,
   canCreateManual,
+  canConfirm,
+  confirmationBlockedReason,
   onGenerate,
   onCreateManual,
   onConfirm,
@@ -85,7 +90,11 @@ export function DynamicEvolutionPanel({
   runtime: DynamicConsultationRuntime
   busy?: boolean
   canGenerate: boolean
+  aiBlockedReason?: string
+  excludedVoiceCount?: number
   canCreateManual: boolean
+  canConfirm: boolean
+  confirmationBlockedReason?: string
   onGenerate: (format: ClinicalDocumentFormat, kind: ClinicalDocumentKind) => void
   onCreateManual: (content: DynamicGeneratedContent) => void
   onConfirm: (
@@ -110,7 +119,28 @@ export function DynamicEvolutionPanel({
   const [manualDraft, setManualDraft] = useState<DynamicGeneratedContent | null>(null)
   const [amendmentMode, setAmendmentMode] = useState(false)
   const [amendmentReason, setAmendmentReason] = useState('')
-  const pendingReview = runtime.quarantine.filter((item) => item.status === 'pendente').length
+  const pendingReview = runtime.quarantine.filter((item) => {
+    if (item.status !== 'pendente') return false
+    return dynamicQuarantineBlocksFinalization(item)
+  }).length
+  const contextualVoiceCount = useMemo(
+    () => new Set(
+      runtime.conversation.turns
+        .filter((turn) => turn.sessionContextAuthorized)
+        .map((turn) => turn.diarizationLabel || turn.contextualRelation || turn.speakerDisplayName)
+        .filter(Boolean)
+    ).size,
+    [runtime.conversation.turns]
+  )
+  const reviewRequiredVoiceCount = useMemo(
+    () => new Set(
+      runtime.conversation.turns
+        .filter((turn) => turn.sessionReviewAuthorized)
+        .map((turn) => turn.diarizationLabel || turn.speakerDisplayName || turn.text)
+        .filter(Boolean)
+    ).size,
+    [runtime.conversation.turns]
+  )
   const semanticRoles = useMemo(
     () => Array.from(new Set(
       runtime.definition.documents
@@ -142,6 +172,22 @@ export function DynamicEvolutionPanel({
 
   return (
     <div className="space-y-4 p-4">
+      <section className="rounded-xl border border-red-200 bg-red-50 p-3" aria-labelledby="finalizacao-atendimento-title">
+        <div className="flex items-start gap-2">
+          <CircleStop className="mt-0.5 h-4 w-4 shrink-0 text-red-700" aria-hidden="true" />
+          <div>
+            <h3 id="finalizacao-atendimento-title" className="text-xs font-semibold text-red-950">
+              Finalização do atendimento
+            </h3>
+            <p className="mt-1 text-[11px] leading-relaxed text-red-800">
+              {kind === 'compartilhavel'
+                ? 'Crie ou revise a evolução compartilhável. O atendimento será encerrado somente quando você confirmar o documento completo.'
+                : 'O registro restrito não encerra o atendimento. Selecione Prontuário e confirme uma evolução compartilhável para finalizar.'}
+            </p>
+          </div>
+        </div>
+      </section>
+
       <section>
         <div className="mb-2 flex items-center gap-2">
           <FileText className="h-4 w-4 text-primary-600" />
@@ -201,12 +247,39 @@ export function DynamicEvolutionPanel({
       {!canGenerate ? (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3" role="alert">
           <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-900">
-            <ShieldAlert className="h-3.5 w-3.5" /> Evolução ainda bloqueada
+            <ShieldAlert className="h-3.5 w-3.5" /> IA indisponível neste momento
           </p>
           <p className="mt-1 text-[11px] text-amber-800">
-            Para usar a IA, encerre a gravação e confirme a identidade e autorização das vozes.
+            {aiBlockedReason || 'Ainda não há transcrição suficiente para gerar a evolução.'}{' '}
             O preenchimento manual continua disponível.
           </p>
+        </div>
+      ) : null}
+
+      {canGenerate && (excludedVoiceCount || contextualVoiceCount || reviewRequiredVoiceCount) ? (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3" role="status">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-blue-900">
+            <ShieldAlert className="h-3.5 w-3.5" /> Uso das falas na evolução
+          </p>
+          <div className="mt-1 space-y-1 text-[11px] leading-relaxed text-blue-800">
+            <p>
+              A separação de falantes é feita ao gerar a evolução e considera o
+              contexto de cada trecho.
+            </p>
+            {contextualVoiceCount ? (
+              <p>
+                Relações reconhecidas, como acompanhante ou mãe do paciente, podem
+                ser citadas com atribuição ou sustentar sugestões revisadas, mas
+                não preenchem o PEP automaticamente.
+              </p>
+            ) : null}
+            {excludedVoiceCount || reviewRequiredVoiceCount ? (
+              <p>
+                Vozes sem papel confirmado podem originar sugestões com revisão
+                obrigatória; trechos irrelevantes são ignorados.
+              </p>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -313,13 +386,21 @@ export function DynamicEvolutionPanel({
                   Resolva ou descarte {pendingReview} item(ns) da central de revisão antes de confirmar.
                 </p>
               ) : null}
+              {!canConfirm && confirmationBlockedReason ? (
+                <p className="mb-2 text-[11px] font-medium text-amber-700" role="alert">
+                  {confirmationBlockedReason}
+                </p>
+              ) : null}
               <Button
                 variant="primary"
                 className="w-full justify-center"
-                disabled={busy || pendingReview > 0 || content.sections.some((section) => !section.content.trim())}
+                disabled={busy || !canConfirm || pendingReview > 0 || content.sections.some((section) => !section.content.trim())}
                 onClick={() => onConfirm(latest, content)}
               >
-                <FileCheck2 className="h-4 w-4" /> Confirmar revisão profissional
+                <FileCheck2 className="h-4 w-4" />
+                {latest.documentKind === 'compartilhavel'
+                  ? 'Confirmar evolução e finalizar atendimento'
+                  : 'Confirmar registro restrito'}
               </Button>
             </div>
           ) : amendmentMode ? (

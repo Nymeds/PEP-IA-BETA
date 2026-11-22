@@ -19,7 +19,6 @@ import { AgendaFormOption, listPublishedAgendaForms } from '@/services/agenda-fo
 import { ScheduleAgenda, ScheduleShift, ScheduleStatus } from '@/types'
 import { cn } from '../shared/utils'
 import { useFeedback } from '@/components/ui/FeedbackProvider'
-import { dynamicPsychologyFormsEnabled } from '@/lib/features'
 
 const weekdayOptions = [
   { value: 0, label: 'Domingo', short: 'Dom' },
@@ -32,12 +31,8 @@ const weekdayOptions = [
 ]
 
 const specialtyCatalog = [
-  { code: 'psicologia', label: 'Psicologia' },
   { code: 'clinica_geral', label: 'Clínica geral' },
-  { code: 'pediatria', label: 'Pediatria' },
-  { code: 'ginecologia_obstetricia', label: 'Ginecologia e Obstetrícia' },
-  { code: 'psiquiatria', label: 'Psiquiatria' },
-  { code: 'cardiologia', label: 'Cardiologia' },
+  { code: 'psicologia', label: 'Psicologia' },
 ] as const
 
 const topicOptions = [
@@ -86,8 +81,8 @@ type AgendaWithForm = ScheduleAgenda & {
 
 const defaultFormState: AgendaFormState = {
   title: '',
-  specialty: 'Psicologia',
-  specialtyCode: 'psicologia',
+  specialty: 'Clínica geral',
+  specialtyCode: 'clinica_geral',
   formTemplateId: null,
   status: 'ativa',
   activeWeekDays: [1, 2, 3, 4, 5],
@@ -160,10 +155,10 @@ function statusLabel(status: ScheduleStatus) {
 
 function agendaSpecialtyKey(agenda: ScheduleAgenda) {
   const agendaWithForm = agenda as AgendaWithForm
-  return agendaWithForm.specialtyCode || inferSpecialtyCode(agenda.specialty) || `legacy:${agenda.specialty}`
+  return agendaWithForm.specialtyCode || inferSpecialtyCode(agenda.specialty) || `sem_codigo:${agenda.specialty}`
 }
 
-function cloneDefaultFormState(specialtyCode = 'psicologia'): AgendaFormState {
+function cloneDefaultFormState(specialtyCode = 'clinica_geral'): AgendaFormState {
   const specialty = specialtyCatalog.find((item) => item.code === specialtyCode) || specialtyCatalog[0]
   return {
     ...defaultFormState,
@@ -188,9 +183,9 @@ export function AgendasSettingsManager() {
     queryFn: () => api.schedule.agendas(),
   })
   const publishedFormsQuery = useQuery({
-    queryKey: ['agenda-published-form-options', 'psicologia'],
-    queryFn: () => listPublishedAgendaForms('psicologia'),
-    enabled: dynamicPsychologyFormsEnabled,
+    queryKey: ['agenda-published-form-options', form.specialtyCode],
+    queryFn: () => listPublishedAgendaForms(form.specialtyCode || ''),
+    enabled: Boolean(form.specialtyCode),
     retry: false,
   })
 
@@ -228,7 +223,7 @@ export function AgendasSettingsManager() {
       ? selectedAgendaWithForm?.formTemplate?.name ||
         (form.formTemplateId ? 'Prontuário anteriormente vinculado' : '')
       : '') ||
-    (form.specialtyCode === 'psicologia' ? 'Nenhum prontuário publicado' : 'Prontuário legado')
+    'Nenhum prontuário publicado'
   const effectiveFormEditorId =
     effectivePublishedForm?.id ||
     (selectedAgendaWithForm?.formTemplateId === form.formTemplateId
@@ -255,9 +250,9 @@ export function AgendasSettingsManager() {
     const source = filteredAgendas
     if (!source.length) {
       setSelectedAgendaId(null)
-      const selectedSpecialtyCode = specialtyFilter !== 'todas' && !specialtyFilter.startsWith('legacy:')
+      const selectedSpecialtyCode = specialtyFilter !== 'todas' && !specialtyFilter.startsWith('sem_codigo:')
         ? specialtyFilter
-        : 'psicologia'
+        : 'clinica_geral'
       setForm(cloneDefaultFormState(selectedSpecialtyCode))
       return
     }
@@ -338,9 +333,9 @@ export function AgendasSettingsManager() {
     }
     setIsCreating(true)
     setSelectedAgendaId(null)
-    const selectedSpecialtyCode = specialtyFilter !== 'todas' && !specialtyFilter.startsWith('legacy:')
+    const selectedSpecialtyCode = specialtyFilter !== 'todas' && !specialtyFilter.startsWith('sem_codigo:')
       ? specialtyFilter
-      : 'psicologia'
+      : 'clinica_geral'
     setForm(cloneDefaultFormState(selectedSpecialtyCode))
     setActiveTopic('identificacao')
   }
@@ -460,7 +455,7 @@ export function AgendasSettingsManager() {
                   const agendaFormName =
                     agendaFormOption?.name ||
                     agendaWithForm.formTemplate?.name ||
-                    (agendaSpecialtyKey(agenda) === 'psicologia' ? defaultPublishedForm?.name || 'Sem prontuário padrão' : '')
+                    defaultPublishedForm?.name || 'Sem prontuário padrão'
 
                   return (
                     <button
@@ -613,9 +608,7 @@ export function AgendasSettingsManager() {
 
           <section className={cn(
             'rounded-2xl border p-5 sm:p-6',
-            dynamicPsychologyFormsEnabled && form.specialtyCode === 'psicologia'
-              ? 'border-primary-200 bg-primary-50/60'
-              : 'border-slate-200 bg-white'
+            'border-primary-200 bg-primary-50/60'
           )}>
             <div className="flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
               <div className="flex min-w-0 items-start gap-3">
@@ -630,7 +623,7 @@ export function AgendasSettingsManager() {
                 </div>
               </div>
 
-              {dynamicPsychologyFormsEnabled && form.specialtyCode === 'psicologia' ? (
+              {form.specialtyCode ? (
                 <div className="grid min-w-0 flex-1 gap-2 lg:max-w-[620px] lg:grid-cols-[minmax(260px,1fr)_auto]">
                   <div>
                     <label className="sr-only" htmlFor="agenda-form-template">Prontuário publicado</label>
@@ -673,12 +666,12 @@ export function AgendasSettingsManager() {
                   </Link>
                 </div>
               ) : (
-                <div className="rounded-lg bg-slate-100 px-3 py-2 text-sm font-medium text-slate-600">
-                  Prontuário legado
+                <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700">
+                  Selecione uma especialidade para carregar os formulários publicados.
                 </div>
               )}
             </div>
-            {publishedFormsQuery.isError && form.specialtyCode === 'psicologia' ? (
+            {publishedFormsQuery.isError && form.specialtyCode ? (
               <p className="mt-3 text-xs text-amber-700" role="status">
                 Não foi possível atualizar a lista agora. O vínculo salvo foi preservado.
               </p>
@@ -722,7 +715,7 @@ export function AgendasSettingsManager() {
                     value={form.title}
                     onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
                     className="form-input"
-                    placeholder="Ex.: Psicologia clínica"
+                    placeholder="Ex.: Clínica Geral"
                   />
                   <p className="mt-2 text-xs text-slate-500">Este nome identifica a agenda nos calendários e agendamentos.</p>
                 </div>
@@ -731,13 +724,10 @@ export function AgendasSettingsManager() {
                   <label className="form-label" htmlFor="agenda-specialty">Especialidade</label>
                   <select
                     id="agenda-specialty"
-                    value={form.specialtyCode || `legacy:${form.specialty}`}
+                    value={form.specialtyCode || ''}
                     onChange={(event) => setSpecialty(event.target.value)}
                     className="form-input"
                   >
-                    {!form.specialtyCode && form.specialty ? (
-                      <option value={`legacy:${form.specialty}`}>{form.specialty} · legado</option>
-                    ) : null}
                     {specialtyCatalog.map((specialty) => (
                       <option key={specialty.code} value={specialty.code}>{specialty.label}</option>
                     ))}

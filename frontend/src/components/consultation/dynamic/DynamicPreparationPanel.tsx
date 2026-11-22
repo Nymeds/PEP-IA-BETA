@@ -1,13 +1,11 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import {
   CheckCircle2,
   CircleAlert,
-  Mic2,
   Plus,
   ShieldCheck,
-  UserRoundCheck,
   Users,
   XCircle,
 } from 'lucide-react'
@@ -19,19 +17,37 @@ import type {
 import { Button } from '@/components/ui/Button'
 import { cn } from '@/components/shared/utils'
 
-export function isDynamicRecordingReady(runtime: DynamicConsultationRuntime) {
+export function getDynamicRecordingBlockers(runtime: DynamicConsultationRuntime) {
   const latestGlobal = new Map<string, boolean>()
   runtime.consents.forEach((consent) => {
     if (!consent.participantId && !latestGlobal.has(consent.type)) {
       latestGlobal.set(consent.type, consent.granted)
     }
   })
-  const hasCoreConsents =
-    latestGlobal.get('gravacao_audio') === true && latestGlobal.get('transcricao_ia') === true
-  const participantsReady = runtime.participants.every(
-    (participant) => !participant.active || participant.role === 'profissional' || participant.authorized
-  )
-  return hasCoreConsents && participantsReady
+
+  const blockers: string[] = []
+  if (latestGlobal.get('gravacao_audio') !== true) {
+    blockers.push('consentimento para gravação de áudio')
+  }
+  if (latestGlobal.get('transcricao_ia') !== true) {
+    blockers.push('consentimento para transcrição e IA')
+  }
+
+  runtime.participants.forEach((participant) => {
+    if (!participant.active || participant.role === 'profissional') return
+    const latestConsent = runtime.consents.find(
+      (consent) => consent.type === 'participacao' && consent.participantId === participant.id
+    )
+    if (!participant.authorized || latestConsent?.granted !== true || latestConsent.revokedAt) {
+      blockers.push(`participação de ${participant.name}`)
+    }
+  })
+
+  return blockers
+}
+
+export function isDynamicRecordingReady(runtime: DynamicConsultationRuntime) {
+  return getDynamicRecordingBlockers(runtime).length === 0
 }
 
 function consentStatus(
@@ -92,36 +108,25 @@ function DecisionButtons({
 export function DynamicPreparationPanel({
   runtime,
   busy,
-  isDiarizing,
   onConsent,
   onAddParticipant,
   onUpdateParticipant,
-  onDiarize,
 }: {
   runtime: DynamicConsultationRuntime
   busy?: boolean
-  isDiarizing?: boolean
   onConsent: (type: DynamicConsentType, granted: boolean, participantId?: string) => void
   onAddParticipant: (data: { name: string; role: string }) => void
   onUpdateParticipant: (
     participantId: string,
-    data: Partial<Pick<DynamicParticipant, 'speakerLabel' | 'active'>>
+    data: Pick<DynamicParticipant, 'active'>
   ) => void
-  onDiarize: () => void
 }) {
   const [name, setName] = useState('')
   const [role, setRole] = useState('acompanhante')
   const recordingConsent = consentStatus(runtime, 'gravacao_audio')
   const aiConsent = consentStatus(runtime, 'transcricao_ia')
-  const recordingReady = isDynamicRecordingReady(runtime)
-  const speakerLabels = useMemo(
-    () => Array.from(new Set(
-      runtime.conversation.turns
-        .map((turn) => turn.diarizationLabel)
-        .filter((label): label is string => Boolean(label))
-    )),
-    [runtime.conversation.turns]
-  )
+  const recordingBlockers = getDynamicRecordingBlockers(runtime)
+  const recordingReady = recordingBlockers.length === 0
 
   const submitParticipant = () => {
     if (!name.trim()) return
@@ -152,6 +157,16 @@ export function DynamicPreparationPanel({
                 ? 'Consentimentos e participantes estão registrados.'
                 : 'A consulta pode ser preenchida manualmente, mas nenhum áudio será capturado.'}
             </p>
+            {!recordingReady ? (
+              <ul className="mt-2 space-y-1 text-[11px] text-amber-900" aria-label="Pendências para liberar a gravação">
+                {recordingBlockers.map((blocker) => (
+                  <li key={blocker} className="flex items-start gap-1.5">
+                    <span aria-hidden="true">•</span>
+                    <span className="first-letter:uppercase">{blocker}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
         </div>
       </div>
@@ -161,10 +176,12 @@ export function DynamicPreparationPanel({
           <ShieldCheck className="h-4 w-4 text-primary-600" />
           <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-700">Consentimentos</h3>
         </div>
-        <div className="space-y-2">
-          <div className="rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-xs font-semibold text-slate-800">Gravação de áudio</p>
-            <p className="mb-2 mt-1 text-[11px] text-slate-500">Finalidade, armazenamento e limitações foram explicados.</p>
+        <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="flex flex-wrap items-center justify-between gap-2.5 p-3">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-slate-800">Gravação de áudio</p>
+              <p className="mt-0.5 text-[10px] text-slate-500">Finalidade e armazenamento explicados.</p>
+            </div>
             <DecisionButtons
               value={recordingConsent?.granted}
               busy={busy}
@@ -172,9 +189,11 @@ export function DynamicPreparationPanel({
               onChange={(value) => onConsent('gravacao_audio', value)}
             />
           </div>
-          <div className="rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-xs font-semibold text-slate-800">Transcrição e assistência por IA</p>
-            <p className="mb-2 mt-1 text-[11px] text-slate-500">A IA auxilia, mas não substitui a revisão profissional.</p>
+          <div className="flex flex-wrap items-center justify-between gap-2.5 p-3">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-slate-800">Transcrição e IA</p>
+              <p className="mt-0.5 text-[10px] text-slate-500">Uso assistivo com revisão profissional.</p>
+            </div>
             <DecisionButtons
               value={aiConsent?.granted}
               busy={busy}
@@ -189,14 +208,17 @@ export function DynamicPreparationPanel({
         <div className="mb-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Users className="h-4 w-4 text-primary-600" />
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-700">Participantes</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-700">Pessoas presentes</h3>
           </div>
-          <span className="text-[10px] text-slate-400">{runtime.participants.filter((item) => item.active).length} ativos</span>
+          <span className="text-[10px] text-slate-400">
+            {runtime.participants.filter((item) => item.active && item.role !== 'profissional').length} presentes
+          </span>
         </div>
         <div className="space-y-2">
-          {runtime.participants.map((participant) => {
-            const professional = participant.role === 'profissional'
-            const coreParticipant = professional || participant.role === 'paciente'
+          {runtime.participants.filter(
+            (participant) => participant.active && participant.role !== 'profissional'
+          ).map((participant) => {
+            const coreParticipant = participant.role === 'paciente'
             const participationConsent = consentStatus(runtime, 'participacao', participant.id)
             return (
               <div key={participant.id} className="rounded-lg border border-slate-200 bg-white p-3">
@@ -205,37 +227,13 @@ export function DynamicPreparationPanel({
                     <p className="truncate text-xs font-semibold text-slate-800">{participant.name}</p>
                     <p className="text-[10px] capitalize text-slate-500">{participant.role.replaceAll('_', ' ')}</p>
                   </div>
-                  {professional ? (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700">
-                      <UserRoundCheck className="h-3 w-3" /> Profissional
-                    </span>
-                  ) : (
-                    <DecisionButtons
-                      value={participationConsent?.granted ?? participant.authorized}
-                      busy={busy}
-                      ariaLabel={`Decisão sobre a participação de ${participant.name}`}
-                      onChange={(value) => onConsent('participacao', value, participant.id)}
-                    />
-                  )}
+                  <DecisionButtons
+                    value={participationConsent?.granted}
+                    busy={busy}
+                    ariaLabel={`Decisão sobre a participação de ${participant.name}`}
+                    onChange={(value) => onConsent('participacao', value, participant.id)}
+                  />
                 </div>
-                {speakerLabels.length ? (
-                  <label className="mt-2 block text-[10px] font-medium text-slate-500">
-                    Voz identificada
-                    <select
-                      value={participant.speakerLabel || ''}
-                      disabled={busy}
-                      onChange={(event) => onUpdateParticipant(participant.id, {
-                        speakerLabel: event.target.value || null,
-                      })}
-                      className="form-input mt-1 py-1.5 text-xs"
-                    >
-                      <option value="">Não associada</option>
-                      {speakerLabels.map((label) => (
-                        <option key={label} value={label}>{label}</option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
                 {!coreParticipant ? (
                   <button
                     type="button"
@@ -243,7 +241,7 @@ export function DynamicPreparationPanel({
                     onClick={() => onUpdateParticipant(participant.id, { active: !participant.active })}
                     className="mt-2 text-[10px] font-semibold text-slate-500 underline-offset-2 hover:text-slate-800 hover:underline disabled:opacity-50"
                   >
-                    {participant.active ? 'Remover desta consulta' : 'Reativar participante'}
+                    Remover desta consulta
                   </button>
                 ) : null}
               </div>
@@ -251,9 +249,14 @@ export function DynamicPreparationPanel({
           })}
         </div>
 
-        <div className="mt-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-3">
-          <p className="text-xs font-semibold text-slate-700">Adicionar participante</p>
-          <div className="mt-2 grid gap-2">
+        <details className="group mt-2 rounded-lg border border-dashed border-slate-300 bg-slate-50">
+          <summary className="cursor-pointer list-none px-3 py-2.5 text-xs font-semibold text-slate-600 hover:text-slate-900">
+            <span className="inline-flex items-center gap-1.5">
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              Adicionar acompanhante
+            </span>
+          </summary>
+          <div className="grid gap-2 border-t border-slate-200 p-3">
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
@@ -271,24 +274,9 @@ export function DynamicPreparationPanel({
               <Plus className="h-3.5 w-3.5" /> Adicionar sem autorizar
             </Button>
           </div>
-        </div>
+        </details>
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white p-3">
-        <div className="flex items-start gap-2">
-          <Mic2 className="mt-0.5 h-4 w-4 text-cyan-600" />
-          <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-slate-800">Separação e identificação das vozes</p>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Execute após a gravação e associe cada voz acima antes de gerar a evolução.
-            </p>
-            <Button size="sm" className="mt-2" onClick={onDiarize} disabled={busy || isDiarizing}>
-              <Mic2 className="h-3.5 w-3.5" />
-              {isDiarizing ? 'Separando vozes...' : 'Separar vozes do áudio'}
-            </Button>
-          </div>
-        </div>
-      </section>
     </div>
   )
 }

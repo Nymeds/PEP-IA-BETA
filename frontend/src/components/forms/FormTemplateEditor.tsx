@@ -69,6 +69,11 @@ import { ErrorState, LoadingState } from '@/components/ui/AsyncState'
 import { useFeedback } from '@/components/ui/FeedbackProvider'
 import { cn } from '@/components/shared/utils'
 import {
+  FORM_FIELD_ICON_OPTIONS,
+  FormFieldIcon,
+  isFormFieldIconName,
+} from '@/components/forms/FormFieldIcon'
+import {
   FORM_CANVAS_WIDTH,
   FORM_GRID_SIZE,
   FORM_LAYOUT_GAP,
@@ -128,6 +133,17 @@ const COLORS: { value: FormColorToken; label: string; swatch: string }[] = [
   { value: 'roxo', label: 'Roxo', swatch: 'bg-violet-500' },
 ]
 
+const FIELD_ACCENT_STYLES: Record<FormColorToken, { accent: string; icon: string }> = {
+  azul: { accent: 'bg-blue-600', icon: 'border-blue-500 bg-blue-50 text-blue-600' },
+  verde: { accent: 'bg-emerald-600', icon: 'border-emerald-500 bg-emerald-50 text-emerald-600' },
+  amarelo: { accent: 'bg-amber-500', icon: 'border-amber-500 bg-amber-50 text-amber-600' },
+  vermelho: { accent: 'bg-red-600', icon: 'border-red-500 bg-red-50 text-red-600' },
+  roxo: { accent: 'bg-violet-600', icon: 'border-violet-500 bg-violet-50 text-violet-600' },
+  cinza: { accent: 'bg-slate-500', icon: 'border-slate-500 bg-slate-100 text-slate-600' },
+  turquesa: { accent: 'bg-cyan-600', icon: 'border-cyan-500 bg-cyan-50 text-cyan-600' },
+  rosa: { accent: 'bg-rose-600', icon: 'border-rose-500 bg-rose-50 text-rose-600' },
+}
+
 const ICONS: { value: string; label: string; icon: LucideIcon }[] = [
   { value: 'ClipboardList', label: 'Prontuário', icon: ClipboardList },
   { value: 'LockKeyhole', label: 'Restrito', icon: LockKeyhole },
@@ -154,6 +170,12 @@ const ICONS: { value: string; label: string; icon: LucideIcon }[] = [
 const SEMANTIC_ROLES = [
   { value: '', label: 'Sem papel regulatório' },
   { value: 'identificacao', label: 'Identificação' },
+  { value: 'queixa_historia_clinica', label: 'Queixa e história clínica' },
+  { value: 'antecedentes_clinicos', label: 'Antecedentes clínicos' },
+  { value: 'revisao_sistemas', label: 'Revisão de sistemas' },
+  { value: 'exame_fisico_sinais_vitais', label: 'Exame físico e sinais vitais' },
+  { value: 'diagnostico_hipoteses', label: 'Diagnósticos e hipóteses' },
+  { value: 'plano_terapeutico', label: 'Plano terapêutico' },
   { value: 'demanda_objetivos', label: 'Demanda e objetivos' },
   { value: 'evolucao_procedimentos', label: 'Evolução e procedimentos' },
   { value: 'encaminhamento_encerramento', label: 'Encaminhamento e encerramento' },
@@ -175,6 +197,8 @@ const REVIEW_ONLY_ROLES = new Set([
   'risco_protecao',
   'avaliacao_risco_detalhada',
   'formulacao_hipoteses',
+  'diagnostico_hipoteses',
+  'plano_terapeutico',
   'materiais_avaliacao_psicologica',
   'medicamentos',
 ])
@@ -365,6 +389,7 @@ function normalizeDefinition(definition: ClinicalFormDefinition): ClinicalFormDe
         ...tab,
         elements: repairElementCollisions(tab.elements.map((element, index) => ({
           ...element,
+          icon: isFormFieldIconName(element.icon) ? element.icon : undefined,
           color: element.color || 'azul',
           required: Boolean(element.required),
           layout: {
@@ -384,14 +409,27 @@ function normalizeDefinition(definition: ClinicalFormDefinition): ClinicalFormDe
 
 function validateDefinition(definition: ClinicalFormDefinition): FormValidationIssue[] {
   const issues: FormValidationIssue[] = []
-  const requiredRoles = [
-    'identificacao',
-    'demanda_objetivos',
-    'evolucao_procedimentos',
-    'encaminhamento_encerramento',
-    'documentos_emitidos',
-    'materiais_avaliacao_psicologica',
-  ]
+  const requiredRoles = definition.specialtyCode === 'psicologia'
+    ? [
+        'identificacao',
+        'demanda_objetivos',
+        'evolucao_procedimentos',
+        'encaminhamento_encerramento',
+        'documentos_emitidos',
+        'materiais_avaliacao_psicologica',
+      ]
+    : definition.specialtyCode === 'clinica_geral'
+      ? [
+          'identificacao',
+          'queixa_historia_clinica',
+          'antecedentes_clinicos',
+          'medicamentos',
+          'exame_fisico_sinais_vitais',
+          'diagnostico_hipoteses',
+          'plano_terapeutico',
+          'documentos_emitidos',
+        ]
+      : ['identificacao', 'documentos_emitidos']
   const roles = new Map<string, { documentKind: string; path: string }>()
 
   if (definition.documents.length !== 2) {
@@ -466,7 +504,7 @@ function validateDefinition(definition: ClinicalFormDefinition): FormValidationI
     }
   })
   const assessmentRole = roles.get('materiais_avaliacao_psicologica')
-  if (assessmentRole && assessmentRole.documentKind !== 'restrito') {
+  if (definition.specialtyCode === 'psicologia' && assessmentRole && assessmentRole.documentKind !== 'restrito') {
     issues.push({ path: assessmentRole.path, message: 'Materiais de avaliação psicológica devem ficar no documento restrito.' })
   }
   return issues
@@ -485,31 +523,48 @@ function FieldPreview({ field, compact = false }: { field: ClinicalFormElement; 
     return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{field.label}</p><hr /></div>
   }
 
+  const fieldIcon = isFormFieldIconName(field.icon) ? field.icon : undefined
+  const fieldTheme = FIELD_ACCENT_STYLES[field.color]
+
   return (
     <div className="h-full min-h-0">
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <span className="truncate text-xs font-medium text-slate-700">{field.label}</span>
-        {field.required ? <span className="text-red-500" aria-label="Obrigatório">*</span> : null}
-        {field.ai.mode !== 'sem_acesso' ? <Sparkles className="h-3 w-3 shrink-0 text-blue-600" aria-label="Campo assistido pela IA" /> : null}
+      <div className={cn('mb-1.5 flex items-center gap-2', fieldIcon && 'mb-2')}>
+        {fieldIcon ? (
+          <span className={cn(
+            'flex shrink-0 items-center justify-center rounded-full border-2',
+            compact ? 'h-7 w-7' : 'h-8 w-8',
+            fieldTheme.icon
+          )}>
+            <FormFieldIcon name={fieldIcon} className={compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} aria-hidden="true" />
+          </span>
+        ) : null}
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-xs font-medium text-slate-700">{field.label}</span>
+          {field.required ? <span className="text-red-500" aria-label="Obrigatório">*</span> : null}
+          {field.ai.mode !== 'sem_acesso' ? <Sparkles className="h-3 w-3 shrink-0 text-blue-600" aria-label="Campo assistido pela IA" /> : null}
+        </div>
       </div>
-      {field.type === 'checkbox' ? (
-        <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-400"><span className="h-4 w-4 rounded border border-slate-300" />Marcar opção</div>
-      ) : field.type === 'texto_longo' ? (
-        <div className="h-[calc(100%-24px)] min-h-14 rounded-md border border-slate-200 bg-white p-2 text-xs text-slate-300">Digite ou aguarde uma sugestão...</div>
-      ) : field.type === 'selecao_unica' || field.type === 'selecao_multipla' ? (
-        <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-400"><span>Selecionar...</span><ChevronDown className="h-3.5 w-3.5" /></div>
-      ) : field.type === 'grupo_repetivel' ? (
-        <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
-          <div className="grid grid-cols-2 bg-slate-50 px-2 py-1.5 text-[10px] font-semibold text-slate-500">
-            {(field.columns || []).slice(0, 2).map((column) => <span key={column.id} className="truncate">{column.label}</span>)}
+      <div className={cn('relative', !fieldIcon && 'pl-2.5')}>
+        {!fieldIcon ? <span className={cn('absolute inset-y-0 left-0 w-1 rounded-full', fieldTheme.accent)} aria-hidden="true" /> : null}
+        {field.type === 'checkbox' ? (
+          <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-400"><span className="h-4 w-4 rounded border border-slate-300" />Marcar opção</div>
+        ) : field.type === 'texto_longo' ? (
+          <div className="min-h-14 rounded-md border border-slate-200 bg-white p-2 text-xs text-slate-300">Digite ou aguarde uma sugestão...</div>
+        ) : field.type === 'selecao_unica' || field.type === 'selecao_multipla' ? (
+          <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-400"><span>Selecionar...</span><ChevronDown className="h-3.5 w-3.5" /></div>
+        ) : field.type === 'grupo_repetivel' ? (
+          <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
+            <div className="grid grid-cols-2 bg-slate-50 px-2 py-1.5 text-[10px] font-semibold text-slate-500">
+              {(field.columns || []).slice(0, 2).map((column) => <span key={column.id} className="truncate">{column.label}</span>)}
+            </div>
+            <div className="p-3 text-center text-xs text-slate-400">Adicionar item</div>
           </div>
-          <div className="p-3 text-center text-xs text-slate-400">Adicionar item</div>
-        </div>
-      ) : (
-        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-300">
-          {field.type === 'data' ? 'dd/mm/aaaa' : field.type === 'numero' ? '0' : 'Digite aqui...'}
-        </div>
-      )}
+        ) : (
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-300">
+            {field.type === 'data' ? 'dd/mm/aaaa' : field.type === 'numero' ? '0' : 'Digite aqui...'}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -521,7 +576,7 @@ function FieldPalette({ onAdd }: { onAdd: (type: FormElementType) => void }) {
         <h2 className="text-sm font-semibold text-slate-900">Componentes</h2>
         <p className="mt-1 text-xs leading-relaxed text-slate-500">Arraste para o canvas ou pressione Enter para inserir.</p>
       </div>
-      <div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-1">
+      <div className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-1">
         {FIELD_TYPES.map(({ type, label, description, icon: Icon }) => (
           <button
             key={type}
@@ -578,6 +633,60 @@ function IconSelect({ value, onChange, id }: { value: string; onChange: (value: 
     <select id={id} className="form-input" value={value} onChange={(event) => onChange(event.target.value)}>
       {ICONS.map((icon) => <option key={icon.value} value={icon.value}>{icon.label}</option>)}
     </select>
+  )
+}
+
+function FieldIconSelect({
+  value,
+  onChange,
+}: {
+  value?: string
+  onChange: (value?: string) => void
+}) {
+  const selectedIcon = isFormFieldIconName(value) ? value : undefined
+  const selectedLabel = selectedIcon
+    ? FORM_FIELD_ICON_OPTIONS.find((option) => option.value === selectedIcon)?.label
+    : null
+
+  return (
+    <div>
+      <div role="radiogroup" aria-label="Ícone do campo" className="grid grid-cols-6 gap-1.5 rounded-xl border border-slate-200 bg-slate-50 p-2">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={!selectedIcon}
+          title="Sem ícone"
+          onClick={() => onChange(undefined)}
+          className={cn(
+            'flex h-9 w-9 items-center justify-center rounded-lg border bg-white text-slate-400 transition-colors hover:border-slate-400 hover:text-slate-700',
+            !selectedIcon && 'border-primary-500 text-primary-600 ring-2 ring-primary-100'
+          )}
+        >
+          <X className="h-4 w-4" aria-hidden="true" />
+          <span className="sr-only">Sem ícone</span>
+        </button>
+        {FORM_FIELD_ICON_OPTIONS.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={selectedIcon === option.value}
+            title={option.label}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              'flex h-9 w-9 items-center justify-center rounded-lg border bg-white text-slate-500 transition-colors hover:border-primary-300 hover:bg-primary-50 hover:text-primary-700',
+              selectedIcon === option.value && 'border-primary-500 bg-primary-50 text-primary-700 ring-2 ring-primary-100'
+            )}
+          >
+            <FormFieldIcon name={option.value} className="h-4 w-4" aria-hidden="true" />
+            <span className="sr-only">{option.label}</span>
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[11px] text-slate-500">
+        {selectedLabel ? `Selecionado: ${selectedLabel}.` : 'Sem ícone: a cor será exibida como um traço ao lado do controle.'}
+      </p>
+    </div>
   )
 }
 
@@ -825,6 +934,7 @@ function FormInspector({
               onFieldChange({
                 ...field,
                 type: nextType,
+                icon: nextType === 'titulo' || nextType === 'divisor' ? undefined : field.icon,
                 ai: nextType === 'titulo' || nextType === 'divisor' ? { mode: 'sem_acesso' } : field.ai,
                 options: needsOptions
                   ? field.options?.length ? field.options : [{ id: createId('opcao'), label: 'Opção 1' }, { id: createId('opcao'), label: 'Opção 2' }]
@@ -837,7 +947,13 @@ function FormInspector({
               {FIELD_TYPES.map((type) => <option key={type.type} value={type.type}>{type.label}</option>)}
             </select>
           </label>
-          <label><span className="form-label">Cor</span><ColorSelect value={field.color} onChange={(color) => onFieldChange({ ...field, color })} /></label>
+          {!aiModeLocked ? (
+            <div>
+              <span className="form-label">Ícone do campo (opcional)</span>
+              <FieldIconSelect value={field.icon} onChange={(icon) => onFieldChange({ ...field, icon })} />
+            </div>
+          ) : null}
+          <label><span className="form-label">Cor de destaque</span><ColorSelect value={field.color} onChange={(color) => onFieldChange({ ...field, color })} /></label>
           <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
             <input type="checkbox" checked={field.required} onChange={(event) => onFieldChange({ ...field, required: event.target.checked })} />Campo obrigatório
           </label>
@@ -1247,7 +1363,7 @@ function RecordPreview({
                     <div
                       key={field.id}
                       className={cn(
-                        'absolute overflow-hidden rounded-xl p-3 pl-4 shadow-sm',
+                        'absolute overflow-hidden rounded-xl p-3 shadow-sm',
                         field.type !== 'titulo' && field.type !== 'divisor' && 'border border-slate-200 bg-white'
                       )}
                       style={{
@@ -1258,9 +1374,6 @@ function RecordPreview({
                         zIndex: layout.zIndex,
                       }}
                     >
-                      {field.type !== 'divisor' ? (
-                        <span className={cn('absolute inset-y-3 left-0 w-1 rounded-r-full', COLORS.find((color) => color.value === field.color)?.swatch)} aria-hidden="true" />
-                      ) : null}
                       <FieldPreview field={field} />
                     </div>
                   )
@@ -1618,7 +1731,7 @@ export function FormTemplateEditor() {
   }
 
   return (
-    <div className="min-h-dvh bg-slate-100">
+    <div className="min-h-dvh bg-[#f6f8fb]">
       {previewOpen ? (
         <RecordPreview
           definition={definition}
@@ -1711,7 +1824,7 @@ export function FormTemplateEditor() {
         </section>
       ) : null}
 
-      <div className="grid items-start gap-4 p-3 xl:grid-cols-[240px_minmax(640px,1fr)_320px] xl:p-4">
+      <div className="grid items-start gap-4 p-3 lg:grid-cols-[210px_minmax(0,1fr)] 2xl:grid-cols-[220px_minmax(600px,1fr)_300px] 2xl:p-4">
         <FieldPalette onAdd={addElement} />
 
         <main className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white" aria-label="Editor visual do formulário">
@@ -1772,7 +1885,7 @@ export function FormTemplateEditor() {
                     onKeyDown={(event) => moveWithKeyboard(field, event)}
                     onClick={(event) => { event.stopPropagation(); setSelectedElementId(field.id) }}
                     className={cn(
-                      'group absolute overflow-visible rounded-xl border-2 bg-white p-3 pl-4 text-left shadow-sm outline-none transition-[border-color,box-shadow]',
+                      'group absolute overflow-visible rounded-xl border-2 bg-white p-3 text-left shadow-sm outline-none transition-[border-color,box-shadow]',
                       selectedElementId === field.id ? 'border-primary-500 ring-2 ring-primary-100' : 'border-transparent hover:border-slate-300 focus-visible:border-primary-500'
                     )}
                     style={{
@@ -1783,10 +1896,6 @@ export function FormTemplateEditor() {
                       zIndex: field.layout.zIndex,
                     }}
                   >
-                    <span
-                      className={cn('absolute inset-y-3 left-0 w-1 rounded-r-full', COLORS.find((color) => color.value === field.color)?.swatch)}
-                      aria-hidden="true"
-                    />
                     <button
                       type="button"
                       className="absolute left-1/2 top-0 z-10 flex h-5 -translate-x-1/2 -translate-y-1/2 cursor-move items-center gap-1 rounded-full border border-slate-300 bg-white px-2 text-[9px] text-slate-500 opacity-0 shadow-sm group-hover:opacity-100 group-focus-within:opacity-100"
@@ -1811,23 +1920,25 @@ export function FormTemplateEditor() {
           </div>
         </main>
 
-        <FormInspector
-          definition={definition}
-          document={document}
-          tab={tab}
-          field={selectedElement}
-          onDefinitionChange={(next) => commit(() => next)}
-          onDocumentChange={(next) => commit((current) => updateDocument(current, document.id, () => next))}
-          onTabChange={(next) => commit((current) => updateTab(current, document.id, tab.id, () => next))}
-          onFieldChange={(next) => {
-            if (hasCollision(tab.elements, next)) {
-              notify('info', 'Alteração de tamanho ou posição bloqueada', 'Os campos não podem se sobrepor no canvas.')
-              return
-            }
-            commit((current) => updateElement(current, document.id, tab.id, next.id, () => next))
-          }}
-          onDeleteField={() => void deleteField()}
-        />
+        <div className="lg:col-start-2 2xl:col-start-auto">
+          <FormInspector
+            definition={definition}
+            document={document}
+            tab={tab}
+            field={selectedElement}
+            onDefinitionChange={(next) => commit(() => next)}
+            onDocumentChange={(next) => commit((current) => updateDocument(current, document.id, () => next))}
+            onTabChange={(next) => commit((current) => updateTab(current, document.id, tab.id, () => next))}
+            onFieldChange={(next) => {
+              if (hasCollision(tab.elements, next)) {
+                notify('info', 'Alteração de tamanho ou posição bloqueada', 'Os campos não podem se sobrepor no canvas.')
+                return
+              }
+              commit((current) => updateElement(current, document.id, tab.id, next.id, () => next))
+            }}
+            onDeleteField={() => void deleteField()}
+          />
+        </div>
       </div>
 
       <footer className="border-t border-slate-200 bg-white px-5 py-3 text-xs text-slate-500">

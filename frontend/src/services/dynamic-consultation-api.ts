@@ -7,7 +7,6 @@ import type {
   DynamicConsent,
   DynamicConsentType,
   DynamicConsultationRuntime,
-  DynamicDiarizationResult,
   DynamicFieldUpdateResult,
   DynamicFormVersionChangeResult,
   DynamicFormVersionPreview,
@@ -16,6 +15,8 @@ import type {
   DynamicMedicationReference,
   DynamicParticipant,
   DynamicQuarantineItem,
+  DynamicTranscriptVersion,
+  DynamicTranscriptVersionCreateResult,
   MedicationReference,
 } from '@/types/forms'
 
@@ -138,15 +139,25 @@ export const dynamicConsultationApi = {
       { method: 'POST', body: JSON.stringify({ force }), timeoutMs: 120_000 }
     ),
 
-  diarize: (consultationId: string) =>
-    request<DynamicDiarizationResult>(`/api/consultations/${consultationId}/diarize`, {
-      method: 'POST',
-      timeoutMs: 180_000,
-    }),
-
   topics: (consultationId: string) =>
     request<{ topics: import('@/types/forms').DynamicConversationTopic[] }>(
       `/api/consultations/${consultationId}/topics`
+    ),
+
+  transcriptVersions: (consultationId: string) =>
+    request<DynamicTranscriptVersion[]>(`/api/consultations/${consultationId}/versions`),
+
+  createTranscriptVersion: (
+    consultationId: string,
+    data: {
+      newTranscript: string
+      reason: string
+      editDiff: { before: string; after: string }
+    }
+  ) =>
+    request<DynamicTranscriptVersionCreateResult>(
+      `/api/consultations/${consultationId}/versions`,
+      { method: 'POST', body: JSON.stringify(data), timeoutMs: 120_000 }
     ),
 
   generateDocument: (

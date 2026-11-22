@@ -1,5 +1,10 @@
 # Guia de arquitetura — PEP IA
 
+> 📖 **Existe um wiki de desenvolvedor detalhado em [`docs/wiki/`](./docs/wiki/README.md)** —
+> mapeado por camadas, com cada função e um "mapa de onde encontrar cada coisa". Ele reflete o
+> **motor de formulários dinâmicos atual**. Este `ARQUITETURA.md` descreve parcialmente uma
+> versão anterior (prontuário de campos fixos); em caso de divergência, **siga o wiki e o código**.
+
 Este documento explica o projeto em dois níveis: o técnico (como o código funciona) e o informal (qual é a ideia por trás dele). O sistema é um MVP de prontuário eletrônico que grava uma consulta, transforma áudio em texto, extrai informações clínicas e gera uma evolução SOAP.
 
 ## 1. Visão rápida

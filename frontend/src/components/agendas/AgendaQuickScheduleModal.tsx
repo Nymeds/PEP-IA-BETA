@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarPlus, Search, UserRound, X } from 'lucide-react'
 import { api } from '@/services/api'
+import { isSelectedScheduleSlotAvailable } from '@/services/schedule-slots'
 import { Consultation, Patient } from '@/types'
 import { formatDateHeading, formatDateTimeLabel } from '../dashboard/calendar-utils'
 import { cn } from '../shared/utils'
@@ -75,11 +76,25 @@ export function AgendaQuickScheduleModal({
       onBooked?.(consultation)
       onClose()
     },
+    onError: () => {
+      setSelectedSlot('')
+      void slotsQuery.refetch()
+    },
   })
 
   useEffect(() => {
     bookingPendingRef.current = booking.isPending
   }, [booking.isPending])
+
+  useEffect(() => {
+    if (
+      selectedSlot &&
+      slotsQuery.data &&
+      !isSelectedScheduleSlotAvailable(slotsQuery.data.slots, selectedSlot)
+    ) {
+      setSelectedSlot('')
+    }
+  }, [selectedSlot, slotsQuery.data])
 
   useEffect(() => {
     if (!open) return
@@ -103,7 +118,7 @@ export function AgendaQuickScheduleModal({
   }, [open])
 
   const canSubmit =
-    Boolean(selectedSlot) &&
+    isSelectedScheduleSlotAvailable(slotsQuery.data?.slots, selectedSlot) &&
     Boolean(selectedPatient || search.trim().length >= 2) &&
     slotsQuery.data?.allowed
 
@@ -247,24 +262,41 @@ export function AgendaQuickScheduleModal({
                       <div className="flex flex-wrap gap-2">
                         {slotsQuery.data.slots
                           .filter((slot) => slot.shiftLabel === shiftLabel)
-                          .map((slot) => (
-                            <button
-                              key={slot.localDateTime}
-                              type="button"
-                              disabled={!slot.available}
-                              onClick={() => setSelectedSlot(slot.isoDateTime)}
-                              className={cn(
-                                'px-3 py-2 rounded-xl border text-sm transition-colors',
-                                !slot.available
-                                  ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
-                                  : selectedSlot === slot.isoDateTime
-                                    ? 'bg-primary-600 text-white border-primary-600'
-                                    : 'bg-white border-slate-200 hover:border-primary-400 text-slate-700'
-                              )}
-                            >
-                              {slot.label}
-                            </button>
-                          ))}
+                          .map((slot) => {
+                            const isPast = slot.unavailableReason === 'horario_passado'
+                            const isAtCapacity = slot.unavailableReason === 'capacidade_esgotada'
+                            const unavailableLabel = isPast
+                              ? 'Horário já encerrado'
+                              : isAtCapacity
+                                ? 'Capacidade do dia esgotada'
+                                : !slot.available
+                                  ? 'Horário indisponível'
+                                  : undefined
+                            return (
+                              <button
+                                key={slot.localDateTime}
+                                type="button"
+                                disabled={!slot.available}
+                                title={unavailableLabel}
+                                aria-label={`${slot.label}${unavailableLabel ? `, ${unavailableLabel.toLowerCase()}` : ''}`}
+                                onClick={() => {
+                                  booking.reset()
+                                  setSelectedSlot(slot.isoDateTime)
+                                }}
+                                className={cn(
+                                  'px-3 py-2 rounded-xl border text-sm transition-colors',
+                                  !slot.available
+                                    ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                    : selectedSlot === slot.isoDateTime
+                                      ? 'bg-primary-600 text-white border-primary-600'
+                                      : 'bg-white border-slate-200 hover:border-primary-400 text-slate-700'
+                                )}
+                              >
+                                {slot.label}
+                                {isAtCapacity ? <span className="ml-1 text-[10px]">Sem vaga</span> : null}
+                              </button>
+                            )
+                          })}
                       </div>
                     </div>
                   ))}

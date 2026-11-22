@@ -126,7 +126,19 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 }
 
-async function mockDynamicConsultation(page: Page) {
+async function mockDynamicConsultation(
+  page: Page,
+  options?: {
+    status?: Consultation['status']
+    startConflict?: {
+      id: string
+      patientName: string
+      startedAt: string
+      scheduleTitle: string
+    }
+    configureRuntime?: (runtime: DynamicConsultationRuntime) => void
+  }
+) {
   const consultation: Consultation = {
     id: 'consulta-dinamica',
     patientId: 'paciente-1',
@@ -139,13 +151,15 @@ async function mockDynamicConsultation(page: Page) {
       createdAt: NOW,
       updatedAt: NOW,
     },
-    status: 'em_consulta',
-    startedAt: NOW,
+    status: options?.status || 'em_consulta',
+    startedAt: options?.status === 'em_espera' || options?.status === 'scheduled' ? undefined : NOW,
     createdAt: NOW,
     updatedAt: NOW,
   }
   const runtime = createRuntime()
+  options?.configureRuntime?.(runtime)
   const fieldPatches: unknown[] = []
+  const state = { fieldPatches, startRequests: 0, consentRequests: 0 }
 
   await page.context().addCookies([
     { name: 'pep_token', value: 'e2e-token', url: 'http://127.0.0.1:3001' },
@@ -155,11 +169,27 @@ async function mockDynamicConsultation(page: Page) {
   }))
   await page.route('**/api/consultations/consulta-dinamica**', async (route) => {
     const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/start')) {
+      state.startRequests += 1
+      if (options?.startConflict) {
+        await fulfillJson(route, {
+          error: 'Já existe outra consulta em andamento para este médico',
+          code: 'ACTIVE_CONSULTATION_EXISTS',
+          activeConsultation: options.startConflict,
+        }, 409)
+        return
+      }
+      consultation.status = 'em_consulta'
+      consultation.startedAt = NOW
+      await fulfillJson(route, consultation)
+      return
+    }
     if (url.pathname.endsWith('/runtime')) {
       await fulfillJson(route, runtime)
       return
     }
     if (url.pathname.endsWith('/consents')) {
+      state.consentRequests += 1
       const body = route.request().postDataJSON() as {
         type: DynamicConsent['type']
         granted: boolean
@@ -199,6 +229,9 @@ async function mockDynamicConsultation(page: Page) {
           evidence: [],
           revision: (document.values[change.fieldId]?.revision || 0) + 1,
           updatedAt: NOW,
+          confidence: null,
+          uncertainty: null,
+          history: [],
         }
       }
       await fulfillJson(route, runtime)
@@ -207,23 +240,165 @@ async function mockDynamicConsultation(page: Page) {
     await fulfillJson(route, consultation)
   })
 
-  return { fieldPatches }
+  return state
 }
+
+test('modal de entrada libera somente o início e mantém os consentimentos clínicos separados', async ({ page }) => {
+  const state = await mockDynamicConsultation(page, { status: 'em_espera' })
+  await page.goto('/consultations/consulta-dinamica')
+
+  const dialog = page.getByRole('dialog', { name: 'Antes de iniciar o atendimento' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Iniciar consulta' })).toBeDisabled()
+
+  await dialog.getByRole('button', { name: 'Agora não' }).click()
+  await expect(dialog).not.toBeVisible()
+  await page.getByRole('button', { name: 'Iniciar consulta' }).click()
+  await expect(dialog).toBeVisible()
+
+  await dialog.getByRole('checkbox', {
+    name: /Estou ciente dos requisitos para iniciar esta consulta/i,
+  }).check()
+  await dialog.getByRole('checkbox', { name: /Não me lembrar novamente/i }).check()
+  await dialog.getByRole('button', { name: 'Iniciar consulta' }).click()
+
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByText('Em consulta', { exact: true })).toBeVisible()
+  expect(state.startRequests).toBe(1)
+  expect(state.consentRequests).toBe(0)
+})
+
+test('modal orienta quando já existe outra consulta em andamento', async ({ page }) => {
+  const state = await mockDynamicConsultation(page, {
+    status: 'em_espera',
+    startConflict: {
+      id: 'consulta-ativa',
+      patientName: 'Paciente em atendimento',
+      startedAt: '2026-07-22T22:42:44.359Z',
+      scheduleTitle: 'Agenda Clínica Geral',
+    },
+  })
+  await page.goto('/consultations/consulta-dinamica')
+
+  const dialog = page.getByRole('dialog', { name: 'Antes de iniciar o atendimento' })
+  await dialog.getByRole('checkbox', {
+    name: /Estou ciente dos requisitos para iniciar esta consulta/i,
+  }).check()
+  await dialog.getByRole('button', { name: 'Iniciar consulta' }).click()
+
+  const alert = dialog.getByRole('alert')
+  await expect(alert).toContainText('Outra consulta já está em andamento')
+  await expect(alert).toContainText('Paciente em atendimento')
+  await expect(alert.getByRole('button', { name: 'Abrir consulta em andamento' })).toBeVisible()
+  await expect(dialog).toBeVisible()
+  expect(state.startRequests).toBe(1)
+})
+
+test('consulta ativa expõe a finalização e direciona para a evolução', async ({ page }) => {
+  await mockDynamicConsultation(page)
+  await page.goto('/consultations/consulta-dinamica')
+
+  const finishButton = page.getByRole('button', { name: 'Finalizar atendimento' })
+  await expect(finishButton).toBeVisible()
+  await finishButton.click()
+
+  const assistantPanel = page.getByRole('tabpanel')
+  await expect(page.getByRole('tab', { name: 'Evolução' })).toHaveAttribute('aria-selected', 'true')
+  await expect(assistantPanel.getByText('IA indisponível neste momento')).toBeVisible()
+  await expect(assistantPanel.getByText('O preenchimento manual continua disponível.')).toBeVisible()
+  await expect(assistantPanel.getByRole('button', { name: 'Preencher SOAP manualmente' })).toBeVisible()
+})
+
+test('histórico mantém voz desconhecida como revisão obrigatória após a identificação final', async ({ page }) => {
+  await mockDynamicConsultation(page, {
+    configureRuntime(runtime) {
+      const professional = runtime.participants.find((item) => item.role === 'profissional')!
+      const patient = runtime.participants.find((item) => item.role === 'paciente')!
+      patient.authorized = true
+      patient.authorizedAt = NOW
+      runtime.consents = [
+        {
+          id: 'consent-participacao',
+          consultationId: runtime.consultationId,
+          participantId: patient.id,
+          type: 'participacao',
+          granted: true,
+          termsVersion: 'v1',
+          evidenceJson: null,
+          recordedAt: NOW,
+          revokedAt: null,
+        },
+        {
+          id: 'consent-ia',
+          consultationId: runtime.consultationId,
+          participantId: null,
+          type: 'transcricao_ia',
+          granted: true,
+          termsVersion: 'v1',
+          evidenceJson: null,
+          recordedAt: NOW,
+          revokedAt: null,
+        },
+        {
+          id: 'consent-audio',
+          consultationId: runtime.consultationId,
+          participantId: null,
+          type: 'gravacao_audio',
+          granted: true,
+          termsVersion: 'v1',
+          evidenceJson: null,
+          recordedAt: NOW,
+          revokedAt: null,
+        },
+      ]
+      runtime.conversation = {
+        transcript: 'Como você está? Estou melhor. Uma fala ao fundo.',
+        segments: [],
+        turns: [
+          { speaker: 'Medico', text: 'Como você está?', diarizationLabel: 'speaker_A', roleSource: 'automatico', participantId: professional.id, participantAuthorized: true },
+          { speaker: 'Paciente', text: 'Estou melhor.', diarizationLabel: 'speaker_B', roleSource: 'automatico', participantId: patient.id, participantAuthorized: true },
+          {
+            speaker: 'Indefinido',
+            text: 'Uma fala ao fundo.',
+            diarizationLabel: 'speaker_C',
+            roleSource: 'desconhecido',
+            sessionReviewAuthorized: true,
+          },
+        ],
+      }
+    },
+  })
+  await page.goto('/consultations/consulta-dinamica')
+
+  await expect(page.getByRole('button', { name: 'Atualizar com IA' })).toBeEnabled()
+  await page.getByRole('button', { name: 'Abrir histórico da conversa' }).click()
+
+  const historyDialog = page.getByRole('dialog', { name: 'Histórico da conversa' })
+  await expect(historyDialog.getByText('Profissional', { exact: true })).toBeVisible()
+  await expect(historyDialog.getByText('Paciente', { exact: true })).toBeVisible()
+  await expect(historyDialog.getByText('Desconhecido 1')).toBeVisible()
+  await expect(historyDialog.getByText('Revisão obrigatória')).toBeVisible()
+  await expect(historyDialog.getByText(/não preenche o PEP automaticamente/i)).toBeVisible()
+  await expect(historyDialog.getByText('speaker_A')).toHaveCount(0)
+  await expect(historyDialog.getByText('speaker_B')).toHaveCount(0)
+  await expect(historyDialog.getByText('speaker_C')).toHaveCount(0)
+})
 
 test('consulta dinâmica bloqueia áudio, audita consentimentos e separa os documentos', async ({ page }, testInfo) => {
   const state = await mockDynamicConsultation(page)
   await page.goto('/consultations/consulta-dinamica')
 
-  const blockedRecording = page.getByRole('button', { name: /Registre consentimentos de áudio/ })
+  const blockedRecording = page.getByRole('button', { name: /Pendências para gravar/ })
   await expect(blockedRecording).toBeDisabled()
 
-  if (testInfo.project.name === 'mobile-390') {
-    await page.getByRole('tab', { name: /Assistente/ }).click()
-  }
+  await page.getByRole('button', { name: 'Registrar consentimentos' }).click()
+  const assistantPanel = page.getByRole('tabpanel')
+  await expect(assistantPanel.getByText('Gravação de áudio', { exact: true })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Consentimentos' })).toHaveAttribute('aria-selected', 'true')
 
-  await page.getByText('Gravação de áudio', { exact: true }).locator('..').getByRole('button', { name: 'Aceitou' }).click()
-  await page.getByText('Transcrição e assistência por IA', { exact: true }).locator('..').getByRole('button', { name: 'Aceitou' }).click()
-  await page.getByText('Paciente Teste', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Aceitou' }).click()
+  await assistantPanel.getByText('Gravação de áudio', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Aceitou' }).click()
+  await assistantPanel.getByText('Transcrição e IA', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Aceitou' }).click()
+  await assistantPanel.getByText('Paciente Teste', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Aceitou' }).click()
 
   await expect(page.getByRole('button', { name: 'Iniciar gravação' })).toBeEnabled()
 
@@ -238,5 +413,5 @@ test('consulta dinâmica bloqueia áudio, audita consentimentos e separa os docu
 
   await page.getByRole('tab', { name: 'Registro restrito', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Hipóteses técnicas' })).toBeVisible()
-  await expect(page.getByText('Não é incluído no prontuário compartilhável nem em sua exportação.')).toBeVisible()
+  await expect(page.getByText('Conteúdo privativo do profissional, separado do prontuário compartilhável e de sua exportação.')).toBeVisible()
 })

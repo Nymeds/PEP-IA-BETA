@@ -35,6 +35,12 @@ export const CLINICAL_COLOR_TOKENS = [
 
 export const CLINICAL_SEMANTIC_ROLES = [
   'identificacao',
+  'queixa_historia_clinica',
+  'antecedentes_clinicos',
+  'revisao_sistemas',
+  'exame_fisico_sinais_vitais',
+  'diagnostico_hipoteses',
+  'plano_terapeutico',
   'enquadramento_consentimentos',
   'demanda_objetivos',
   'contexto_funcionamento',
@@ -52,20 +58,38 @@ export const CLINICAL_SEMANTIC_ROLES = [
   'outros',
 ] as const
 
-export const REQUIRED_PSYCHOLOGY_ROLES = [
-  'identificacao',
-  'demanda_objetivos',
-  'evolucao_procedimentos',
-  'encaminhamento_encerramento',
-  'documentos_emitidos',
-  'materiais_avaliacao_psicologica',
-] as const
+const SPECIALTY_REQUIRED_ROLES: Record<string, readonly (typeof CLINICAL_SEMANTIC_ROLES)[number][]> = {
+  psicologia: [
+    'identificacao',
+    'demanda_objetivos',
+    'evolucao_procedimentos',
+    'encaminhamento_encerramento',
+    'documentos_emitidos',
+    'materiais_avaliacao_psicologica',
+  ],
+  clinica_geral: [
+    'identificacao',
+    'queixa_historia_clinica',
+    'antecedentes_clinicos',
+    'medicamentos',
+    'exame_fisico_sinais_vitais',
+    'diagnostico_hipoteses',
+    'plano_terapeutico',
+    'documentos_emitidos',
+  ],
+}
+
+function requiredRolesForSpecialty(specialtyCode: string) {
+  return SPECIALTY_REQUIRED_ROLES[specialtyCode] || ['identificacao', 'documentos_emitidos'] as const
+}
 
 const REVIEW_ONLY_SEMANTIC_ROLES = new Set([
   'medicamentos',
   'risco_protecao',
   'avaliacao_risco_detalhada',
   'formulacao_hipoteses',
+  'diagnostico_hipoteses',
+  'plano_terapeutico',
   'materiais_avaliacao_psicologica',
   'encaminhamento_encerramento',
 ])
@@ -257,12 +281,20 @@ const fieldRelationshipSchema = z
   })
   .strict()
 
+const fieldIconSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(60)
+  .regex(/^[A-Za-z][A-Za-z0-9]*$/, 'Icone de campo invalido')
+
 const fieldSchema = z
   .object({
     id: safeIdSchema,
     type: z.enum(CLINICAL_FIELD_TYPES),
     label: shortTextSchema,
     helpText: z.string().trim().max(500).optional(),
+    icon: fieldIconSchema.optional(),
     color: z.enum(CLINICAL_COLOR_TOKENS).default('azul'),
     required: z.boolean().default(false),
     semanticRole: z.enum(CLINICAL_SEMANTIC_ROLES).optional(),
@@ -326,6 +358,7 @@ const draftFieldSchema = z
     type: z.enum(CLINICAL_FIELD_TYPES),
     label: z.string().trim().max(120),
     helpText: z.string().trim().max(500).optional(),
+    icon: fieldIconSchema.optional(),
     color: z.enum(CLINICAL_COLOR_TOKENS).default('azul'),
     required: z.boolean().default(false),
     semanticRole: z.enum(CLINICAL_SEMANTIC_ROLES).optional(),
@@ -533,7 +566,8 @@ const formDefinitionSchema = baseFormDefinitionSchema.superRefine((definition, c
       }
     }
 
-    for (const role of REQUIRED_PSYCHOLOGY_ROLES) {
+    const requiredRoles = requiredRolesForSpecialty(definition.specialtyCode)
+    for (const role of requiredRoles) {
       if (!roleLocations.has(role)) {
         context.addIssue({
           code: 'custom',
@@ -543,7 +577,7 @@ const formDefinitionSchema = baseFormDefinitionSchema.superRefine((definition, c
       }
     }
 
-    const sharedRequiredRoles = REQUIRED_PSYCHOLOGY_ROLES.filter(
+    const sharedRequiredRoles = requiredRoles.filter(
       (role) => role !== 'materiais_avaliacao_psicologica'
     )
     for (const role of sharedRequiredRoles) {
@@ -556,7 +590,10 @@ const formDefinitionSchema = baseFormDefinitionSchema.superRefine((definition, c
       }
     }
 
-    if (!roleLocations.get('materiais_avaliacao_psicologica')?.has('restrito')) {
+    if (
+      definition.specialtyCode === 'psicologia' &&
+      !roleLocations.get('materiais_avaliacao_psicologica')?.has('restrito')
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['documents'],

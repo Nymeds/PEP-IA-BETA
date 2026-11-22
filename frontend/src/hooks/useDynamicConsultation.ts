@@ -41,8 +41,7 @@ export function useDynamicConsultation(consultationId: string) {
     queryFn: () => dynamicConsultationApi.runtime(consultationId),
   })
   const response = query.data
-  const runtime: DynamicConsultationRuntime | undefined =
-    response?.formMode === 'dynamic' ? response : undefined
+  const runtime: DynamicConsultationRuntime | undefined = response
   const [values, setValues] = useState<LocalDocumentValues>(emptyValues)
   const [saveState, setSaveState] = useState<'idle' | 'pending' | 'saving' | 'saved' | 'error'>('idle')
   const [saveError, setSaveError] = useState<string | null>(null)

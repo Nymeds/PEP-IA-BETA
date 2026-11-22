@@ -9,7 +9,12 @@ import {
   verifyPassword,
 } from '../lib/auth'
 import { getDefaultSettingsPayload } from '../lib/schedule'
-import { ensurePsychologyTemplateForUser } from '../services/form-templates.service'
+import {
+  ensureBaseFormTemplatesForUser,
+  ensureBaseSpecialties,
+  GENERAL_CLINIC_SPECIALTY_CODE,
+  migrateOwnedRecordsToDynamic,
+} from '../services/form-templates.service'
 
 interface RegisterBody {
   email?: string
@@ -60,6 +65,8 @@ export async function registerUser(
   try {
     const { email, password, name, suggestedName } = validateRegister(req.body || {})
 
+    await ensureBaseSpecialties()
+
     const existing = await getPrisma().user.findUnique({ where: { email } })
     if (existing) {
       return reply.status(409).send({ error: 'Ja existe um usuario com este e-mail' })
@@ -75,7 +82,8 @@ export async function registerUser(
         schedules: {
           create: {
             title: 'Agenda principal',
-            specialty: 'Clinica geral',
+            specialty: 'Clínica Geral',
+            specialtyCode: GENERAL_CLINIC_SPECIALTY_CODE,
             status: 'ativa',
             ...getDefaultSettingsPayload(),
           },
@@ -87,7 +95,16 @@ export async function registerUser(
     // O cadastro nao deve falhar por uma indisponibilidade transitória do seed;
     // a listagem de formularios repete esta operacao de forma idempotente.
     try {
-      await ensurePsychologyTemplateForUser(user.id)
+      const templates = await ensureBaseFormTemplatesForUser(user.id)
+      const generalTemplate = templates.find(
+        (template) => template.specialtyCode === GENERAL_CLINIC_SPECIALTY_CODE
+      )
+      if (generalTemplate) {
+        await getPrisma().schedule.updateMany({
+          where: { userId: user.id, specialtyCode: GENERAL_CLINIC_SPECIALTY_CODE },
+          data: { formTemplateId: generalTemplate.id },
+        })
+      }
     } catch (seedError) {
       console.error('[formularios] Nao foi possivel criar o preset inicial:', seedError)
     }
@@ -121,6 +138,12 @@ export async function loginUser(
 
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     return reply.status(401).send({ error: 'E-mail ou senha invalidos' })
+  }
+
+  try {
+    await migrateOwnedRecordsToDynamic(user.id)
+  } catch (migrationError) {
+    console.error('[formularios] Nao foi possivel concluir a migracao automatica:', migrationError)
   }
 
   const token = signJwt(user)

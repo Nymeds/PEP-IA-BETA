@@ -10,16 +10,18 @@ import {
   getDateAvailability,
   getEnabledShiftCount,
   getMaxAppointmentsPerDay,
+  getScheduleSlotUnavailableReason,
+  isScheduleSlotInPast,
   normalizeConsultationStatus,
   normalizeScheduleSettings,
   normalizeScheduleStatus,
   toPrismaScheduleSettings,
 } from '../lib/schedule'
 import {
-  PSYCHOLOGY_SPECIALTY_CODE,
   ensureSpecialtyProfile,
   resolvePublishedVersionForSchedule,
   resolveScheduleTemplate,
+  ScheduleFormConfigurationError,
 } from '../services/form-templates.service'
 
 interface ScheduleSettingsBody {
@@ -65,6 +67,7 @@ const appointmentInclude = Prisma.validator<Prisma.ConsultationInclude>()({
 })
 
 type AppointmentRecord = Prisma.ConsultationGetPayload<{ include: typeof appointmentInclude }>
+type ScheduleQueryClient = Pick<Prisma.TransactionClient, 'consultation'>
 
 interface AgendaParams {
   agendaId: string
@@ -175,14 +178,14 @@ function serializeAppointment(consultation: AppointmentRecord) {
   const activeClinicalParticipants = consultation.participants.filter(
     (participant) => participant.active && participant.role !== 'profissional'
   )
-  const consentReady = consultation.formMode !== 'dynamic' || (
+  const consentReady = (
     latestConsent('gravacao_audio')?.granted === true &&
     latestConsent('transcricao_ia')?.granted === true &&
     activeClinicalParticipants.every((participant) =>
       participant.authorized && latestConsent('participacao', participant.id)?.granted === true
     )
   )
-  const aiReady = consultation.formMode === 'dynamic' && consentReady &&
+  const aiReady = consentReady &&
     Boolean(consultation.formTemplateVersionId) &&
     consultation.aiState?.processingThroughSequence == null
   return {
@@ -201,9 +204,9 @@ function serializeAppointment(consultation: AppointmentRecord) {
     formTemplateName: consultation.formTemplateVersion?.template.name || null,
     formVersion: consultation.formTemplateVersion?.version || null,
     formTemplateVersion: consultation.formTemplateVersion,
-    consentStatus: consultation.formMode === 'dynamic' ? (consentReady ? 'confirmado' : 'pendente') : null,
+    consentStatus: consentReady ? 'confirmado' : 'pendente',
     consentReady,
-    aiReadiness: consultation.formMode === 'dynamic' ? (aiReady ? 'pronta' : 'preparacao_pendente') : null,
+    aiReadiness: aiReady ? 'pronta' : 'preparacao_pendente',
     aiReady,
     scheduleId: consultation.schedule?.id || null,
     scheduleTitle: consultation.schedule?.title || null,
@@ -219,10 +222,14 @@ async function findOwnedAgenda(agendaId: string, userId: string) {
   })
 }
 
-async function listDayAppointments(userId: string, dateString: string) {
+async function listDayAppointments(
+  userId: string,
+  dateString: string,
+  database: ScheduleQueryClient = getPrisma()
+) {
   const dayStart = new Date(`${dateString}T00:00:00`)
   const dayEnd = new Date(`${dateString}T23:59:59.999`)
-  return getPrisma().consultation.findMany({
+  return database.consultation.findMany({
     where: {
       userId,
       scheduledAt: { gte: dayStart, lte: dayEnd },
@@ -236,9 +243,10 @@ async function validateAgendaSlot(
   userId: string,
   agenda: ScheduleRecord,
   requestedAt: Date,
-  excludeConsultationId?: string
+  excludeConsultationId?: string,
+  database: ScheduleQueryClient = getPrisma()
 ) {
-  if (requestedAt.getTime() < Date.now() - 60_000) {
+  if (isScheduleSlotInPast(requestedAt)) {
     throw createHttpError('Nao e possivel agendar consultas no passado', 400)
   }
 
@@ -252,7 +260,7 @@ async function validateAgendaSlot(
     throw createHttpError(availability.reason || 'Dia indisponivel na agenda', 400)
   }
 
-  const dayAppointments = await listDayAppointments(userId, dateString)
+  const dayAppointments = await listDayAppointments(userId, dateString, database)
   const blockingAppointments = dayAppointments.filter(
     (appointment) =>
       appointment.id !== excludeConsultationId &&
@@ -306,6 +314,7 @@ function parseAgendaPayload(body: ScheduleSettingsBody, existing?: ScheduleRecor
     body.specialtyCode === undefined
       ? existing?.specialtyCode || null
       : body.specialtyCode?.trim().toLowerCase() || null
+  if (!specialtyCode) throw createHttpError('Informe o codigo da especialidade da agenda', 400)
   const specialtyChanged =
     body.specialtyCode !== undefined && specialtyCode !== (existing?.specialtyCode || null)
 
@@ -339,12 +348,7 @@ export async function createSchedule(
 ) {
   try {
     const payload = parseAgendaPayload(req.body || {})
-    if (payload.formTemplateId && payload.specialtyCode !== PSYCHOLOGY_SPECIALTY_CODE) {
-      return reply.status(400).send({ error: 'O formulario selecionado nao pertence a uma especialidade dinamica' })
-    }
-    if (payload.specialtyCode) {
-      await ensureSpecialtyProfile(payload.specialtyCode, payload.specialty)
-    }
+    await ensureSpecialtyProfile(payload.specialtyCode, payload.specialty)
     const selectedTemplate = await resolveScheduleTemplate({
       userId: req.authUser!.id,
       specialtyCode: payload.specialtyCode,
@@ -388,12 +392,7 @@ export async function updateSchedule(
     if (!existing) return reply.status(404).send({ error: 'Agenda nao encontrada' })
 
     const payload = parseAgendaPayload(req.body || {}, existing)
-    if (payload.formTemplateId && payload.specialtyCode !== PSYCHOLOGY_SPECIALTY_CODE) {
-      return reply.status(400).send({ error: 'O formulario selecionado nao pertence a uma especialidade dinamica' })
-    }
-    if (payload.specialtyCode) {
-      await ensureSpecialtyProfile(payload.specialtyCode, payload.specialty)
-    }
+    await ensureSpecialtyProfile(payload.specialtyCode, payload.specialty)
     const selectedTemplate = await resolveScheduleTemplate({
       userId: req.authUser!.id,
       specialtyCode: payload.specialtyCode,
@@ -604,6 +603,8 @@ export async function getAvailableSlots(
     const blockingAppointments = appointments.filter(
       (appointment) => normalizeConsultationStatus(appointment.status) !== CONSULTATION_STATUS.CANCELED
     )
+    const dailyCapacityReached =
+      blockingAppointments.length >= getMaxAppointmentsPerDay(settings)
     const appointmentsBySlot = new Map(
       blockingAppointments
         .filter((appointment) => appointment.scheduledAt)
@@ -612,6 +613,7 @@ export async function getAvailableSlots(
           serializeAppointment(appointment),
         ])
     )
+    const slotsReferenceTime = Date.now()
 
     return reply.send({
       date: input,
@@ -622,11 +624,21 @@ export async function getAvailableSlots(
       enabledShiftCount: getEnabledShiftCount(settings),
       maxAppointmentsPerDay: getMaxAppointmentsPerDay(settings),
       occupiedCount: blockingAppointments.length,
-      slots: generatedSlots.map((slot) => ({
-        ...slot,
-        available: !appointmentsBySlot.has(slot.localDateTime),
-        appointment: appointmentsBySlot.get(slot.localDateTime) || null,
-      })),
+      slots: generatedSlots.map((slot) => {
+        const appointment = appointmentsBySlot.get(slot.localDateTime) || null
+        const unavailableReason = getScheduleSlotUnavailableReason({
+          isoDateTime: slot.isoDateTime,
+          hasAppointment: Boolean(appointment),
+          dailyCapacityReached,
+          now: slotsReferenceTime,
+        })
+        return {
+          ...slot,
+          available: unavailableReason === null,
+          unavailableReason,
+          appointment,
+        }
+      }),
       appointments: appointments.map(serializeAppointment),
     })
   } catch (error) {
@@ -664,58 +676,101 @@ export async function quickBookAppointment(
     const agenda = await findOwnedAgenda(req.params.agendaId, userId)
     if (!agenda) return reply.status(404).send({ error: 'Agenda nao encontrada' })
 
-    await validateAgendaSlot(userId, agenda, requestedAt)
+    let pinnedForm
+    try {
+      pinnedForm = await resolvePublishedVersionForSchedule({
+        userId,
+        specialtyCode: agenda.specialtyCode,
+        formTemplateId: agenda.formTemplateId,
+      })
+    } catch (error) {
+      if (error instanceof ScheduleFormConfigurationError) {
+        throw createHttpError(error.message, 409)
+      }
+      throw error
+    }
+    if (!pinnedForm) {
+      throw createHttpError(
+        'Configure uma especialidade e um formulario publicado para esta agenda antes de agendar',
+        409
+      )
+    }
 
     const prisma = getPrisma()
-    let patient = patientId
-      ? await prisma.patient.findFirst({
-          where: { id: patientId, userId },
+    const consultation = await prisma.$transaction(async (tx) => {
+      // O no-op adquire o lock de escrita do SQLite antes de reler o slot. Assim,
+      // duas abas nao conseguem validar e gravar a mesma vaga simultaneamente.
+      const lockedAgendaCount = await tx.$executeRaw`
+        UPDATE "Schedule" SET "updatedAt" = "updatedAt" WHERE "id" = ${agenda.id}
+      `
+      if (lockedAgendaCount !== 1) {
+        throw createHttpError('Agenda nao encontrada', 404)
+      }
+      const lockedAgenda = await tx.schedule.findFirst({
+        where: { id: agenda.id, userId },
+      })
+      if (!lockedAgenda) {
+        throw createHttpError('Agenda nao encontrada', 404)
+      }
+      const agendaChanged =
+        lockedAgenda.updatedAt.getTime() !== agenda.updatedAt.getTime() ||
+        lockedAgenda.status !== agenda.status ||
+        lockedAgenda.specialtyCode !== agenda.specialtyCode ||
+        lockedAgenda.formTemplateId !== agenda.formTemplateId ||
+        lockedAgenda.activeWeekDaysJson !== agenda.activeWeekDaysJson ||
+        lockedAgenda.workOnHolidays !== agenda.workOnHolidays ||
+        lockedAgenda.appointmentDurationMinutes !== agenda.appointmentDurationMinutes ||
+        lockedAgenda.shiftsJson !== agenda.shiftsJson
+      if (agendaChanged) {
+        throw createHttpError(
+          'A agenda foi alterada enquanto o agendamento era realizado. Atualize as vagas e tente novamente',
+          409
+        )
+      }
+      await validateAgendaSlot(userId, lockedAgenda, requestedAt, undefined, tx)
+
+      let patient = patientId
+        ? await tx.patient.findFirst({
+            where: { id: patientId, userId },
+            select: { id: true, name: true },
+          })
+        : null
+
+      if (!patient && patientName) {
+        patient = await tx.patient.findFirst({
+          where: {
+            userId,
+            OR: [{ name: patientName }, { socialName: patientName }],
+          },
           select: { id: true, name: true },
         })
-      : null
+      }
 
-    if (!patient && patientName) {
-      patient = await prisma.patient.findFirst({
-        where: {
-          userId,
-          OR: [{ name: patientName }, { socialName: patientName }],
-        },
-        select: { id: true, name: true },
-      })
-    }
+      if (!patient && patientName) {
+        patient = await tx.patient.create({
+          data: {
+            userId,
+            name: patientName,
+            quickCreated: true,
+          },
+          select: { id: true, name: true },
+        })
+      }
 
-    if (!patient && patientName) {
-      patient = await prisma.patient.create({
-        data: {
-          userId,
-          name: patientName,
-          quickCreated: true,
-        },
-        select: { id: true, name: true },
-      })
-    }
+      if (!patient) {
+        throw createHttpError('Paciente nao encontrado para este usuario', 404)
+      }
 
-    if (!patient) {
-      return reply.status(404).send({ error: 'Paciente nao encontrado para este usuario' })
-    }
-
-    const pinnedForm = await resolvePublishedVersionForSchedule({
-      userId,
-      specialtyCode: agenda.specialtyCode,
-      formTemplateId: agenda.formTemplateId,
-    })
-
-    const consultation = await prisma.$transaction(async (tx) => {
       const created = await tx.consultation.create({
         data: {
           userId,
           patientId: patient.id,
-          scheduleId: agenda.id,
-          specialtyCode: agenda.specialtyCode,
-          formMode: pinnedForm ? 'dynamic' : 'legacy',
-          formTemplateVersionId: pinnedForm?.version.id || null,
-          formDefinitionSnapshot: pinnedForm?.version.definitionJson || null,
-          formPinnedAt: pinnedForm ? new Date() : null,
+          scheduleId: lockedAgenda.id,
+          specialtyCode: lockedAgenda.specialtyCode,
+          formMode: 'dynamic',
+          formTemplateVersionId: pinnedForm.version.id,
+          formDefinitionSnapshot: pinnedForm.version.definitionJson,
+          formPinnedAt: new Date(),
           status: CONSULTATION_STATUS.WAITING,
           scheduledAt: requestedAt,
         },
@@ -737,8 +792,27 @@ export async function quickBookAppointment(
 
     return reply.status(201).send(consultation)
   } catch (error) {
-    return reply.status(getErrorStatus(error, 400)).send({
-      error: error instanceof Error ? error.message : 'Nao foi possivel agendar a consulta',
+    const prismaCode = typeof error === 'object' && error && 'code' in error
+      ? String((error as { code?: unknown }).code)
+      : ''
+    if (['P1008', 'P2028', 'P2034'].includes(prismaCode)) {
+      return reply.status(409).send({
+        error: 'O horario acabou de ser atualizado. Recarregue as vagas e tente novamente',
+      })
+    }
+    const status = getErrorStatus(error, 500)
+    if (status >= 500) {
+      req.log.error(
+        { err: error, agendaId: req.params.agendaId },
+        'Falha inesperada ao realizar agendamento rapido'
+      )
+    }
+    return reply.status(status).send({
+      error: status >= 500
+        ? 'Nao foi possivel agendar a consulta'
+        : error instanceof Error
+          ? error.message
+          : 'Nao foi possivel agendar a consulta',
     })
   }
 }

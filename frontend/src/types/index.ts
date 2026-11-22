@@ -86,7 +86,7 @@ export interface FamilyHistory {
 export interface Consultation {
   id: string
   patientId: string
-  formMode?: 'legacy' | 'dynamic'
+  formMode?: 'dynamic'
   specialtyCode?: string | null
   formTemplateVersionId?: string | null
   formDefinitionSnapshot?: string | null
@@ -388,7 +388,7 @@ export interface CalendarAppointment {
   scheduleSpecialty?: string | null
   scheduleSpecialtyCode?: string | null
   scheduleFormTemplateId?: string | null
-  formMode?: 'legacy' | 'dynamic' | null
+  formMode?: 'dynamic' | null
   specialtyCode?: string | null
   formTemplateVersionId?: string | null
   formTemplateName?: string | null
@@ -445,6 +445,12 @@ export interface ScheduleAgendaCalendarResponse {
   }
 }
 
+export type ScheduleSlotUnavailableReason =
+  | 'horario_passado'
+  | 'horario_ocupado'
+  | 'capacidade_esgotada'
+  | null
+
 export interface ScheduleSlot {
   shiftId: string
   shiftLabel: string
@@ -452,6 +458,7 @@ export interface ScheduleSlot {
   localDateTime: string
   isoDateTime: string
   available: boolean
+  unavailableReason: ScheduleSlotUnavailableReason
   appointment: CalendarAppointment | null
 }
 
